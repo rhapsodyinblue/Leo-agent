@@ -1,0 +1,595 @@
+import os
+import json
+import uuid
+from datetime import datetime
+import ollama
+import chainlit as cl
+
+MODEL = "qwen2.5-coder:7b"
+ESCALATION_MODEL = "deepseek-r1:32b"
+
+LEO_FILES_PATH = os.path.expanduser("~/Desktop/Leo_Files")
+TASK_QUEUE_PATH = os.path.join(LEO_FILES_PATH, "TASK_QUEUE.json")
+
+MAX_HISTORY_MESSAGES = 6
+
+def load_file(filename: str) -> str:
+
+    path = os.path.join(LEO_FILES_PATH, filename)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except Exception:
+        return f"[Missing: {filename}]"
+
+def safe_knowledge_path(filename):
+    filename = filename.strip().lstrip("/")
+    path = os.path.abspath(os.path.join(LEO_FILES_PATH, filename))
+    if not path.startswith(os.path.abspath(LEO_FILES_PATH)):
+        raise ValueError("Unsafe file path.")
+    return path
+
+def stage_file_write(filename, content):
+    cl.user_session.set("pending_write", {"filename": filename, "content": content})
+
+def get_pending_write():
+    return cl.user_session.get("pending_write")
+
+def clear_pending_write():
+    cl.user_session.set("pending_write", None)
+
+
+
+def load_tasks():
+    if not os.path.exists(TASK_QUEUE_PATH):
+        return {"tasks": []}
+    try:
+        with open(TASK_QUEUE_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except:
+        return {"tasks": []}
+
+def save_tasks(data):
+    os.makedirs(LEO_FILES_PATH, exist_ok=True)
+    with open(TASK_QUEUE_PATH, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+
+def create_task(goal, assigned_role="leader", requested_by="caleb", inputs=None):
+    data = load_tasks()
+    task = {
+        "task_id": str(uuid.uuid4())[:8],
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+        "status": "pending",
+        "requested_by": requested_by,
+        "assigned_role": assigned_role,
+        "goal": goal,
+        "inputs": inputs or {},
+        "next_action": None,
+        "result": None,
+        "needs_user": False,
+        "memory_candidate": None
+    }
+    data["tasks"].append(task)
+    save_tasks(data)
+    return task
+
+def update_task(task_id, updates):
+    data = load_tasks()
+    for task in data.get("tasks", []):
+        if task["task_id"] == task_id:
+            task.update(updates)
+            task["updated_at"] = datetime.now().isoformat(timespec="seconds")
+            save_tasks(data)
+            return task
+    return None
+
+def get_next_pending_task():
+    data = load_tasks()
+    for task in data.get("tasks", []):
+        if task.get("status") == "pending":
+            return task
+    return None
+
+def get_task(task_id):
+    data = load_tasks()
+    for task in data.get("tasks", []):
+        if task["task_id"] == task_id:
+            return task
+    return None
+
+def needs_troubleshooting(text: str) -> bool:
+    keywords = ["error","bug","fail","failure","broken","debug","traceback","exception","crash","not working","fix","webhook"]
+    return any(k in text.lower() for k in keywords)
+
+def needs_project_status(text: str) -> bool:
+    keywords = ["status","next action","next step","what are we working on","blocker","priority","project"]
+    return any(k in text.lower() for k in keywords)
+
+def wants_structured(text: str) -> bool:
+    t = text.lower()
+    return t.startswith("/agent") or "structured output" in t or "json mode" in t
+
+def build_system_prompt(user_message: str, structured: bool = False) -> str:
+    prompt = f"""
+You are Leo, Caleb's local AI agent system.
+
+=== IDENTITY ===
+{load_file("IDENTITY.md")}
+
+=== SOUL ===
+{load_file("SOUL.md")}
+
+Core rules:
+- Be direct, practical, and action-oriented.
+- Do not restate protocols.
+- Do not explain the whole framework.
+- Give only the next useful action unless asked for more.
+- Maximum response length: 8 bullets or fewer.
+"""
+    if structured:
+        prompt += """
+STRUCTURED OUTPUT MODE:
+You MUST respond ONLY with valid JSON.
+No markdown. No text before or after JSON.
+
+{
+  "role": "leader",
+  "phase": "triage | plan | execute | test | document | escalate | none",
+  "thought": "brief reasoning",
+  "action": "next concrete action",
+  "result": "answer or output",
+  "needs_user": true,
+  "next_agent": "none | coder | researcher | tester | documenter | leader",
+  "memory_candidate": {
+    "should_store": false,
+    "lesson": "",
+    "why_it_matters": "",
+    "confidence": 0
+  }
+}
+"""
+    if needs_project_status(user_message):
+        prompt += f"\n=== PROJECT STATUS ===\n{load_file('PROJECT_STATUS.md')}\n"
+
+    if needs_troubleshooting(user_message):
+        prompt += f"\n=== TROUBLESHOOTING ===\n{load_file('GENERAL-TROUBLESHOOTING-FRAMEWORK-V5-FINAL.md')}\n"
+
+    return prompt
+
+def build_task_prompt(task):
+    return f"""
+You are executing a task inside Caleb's local Leo multi-agent system.
+
+Assigned role: {task.get("assigned_role")}
+Task ID: {task.get("task_id")}
+Goal: {task.get("goal")}
+
+Return ONLY valid JSON using this schema:
+
+{{
+  "status": "done | blocked | needs_user",
+  "role": "{task.get("assigned_role")}",
+  "phase": "triage | plan | execute | test | document | escalate | none",
+  "result": "What was decided, drafted, proposed, or actually completed by a real tool.",
+  "next_action": "The next concrete action. If no real file/code tool was used, name the file or change that still needs to be applied.",
+  "file_write": {{
+    "should_stage": false,
+    "filename": "",
+    "content": ""
+  }},
+  "needs_user": false,
+  "memory_candidate": {{
+    "should_store": false,
+    "lesson": "",
+    "why_it_matters": "",
+    "confidence": 0
+  }}
+}}
+
+Rules:
+- Default to progressing the task without asking the user.
+- Only use "needs_user" if the task cannot proceed without specific missing information.
+- You MAY make assumptions, but you MUST explicitly state them in the result.
+- If assumptions are made, they must be reasonable, minimal, and clearly labeled as assumptions.
+- Do NOT invent facts about the system state or files.
+- Do NOT claim you created, edited, saved, patched, deleted, tested, ran, verified, documented, or updated any file/code unless the system actually performed that action.
+- If the task requires file/code/documentation changes and no file tool was used, you may ONLY say you drafted, proposed, outlined, or recommended the change.
+- Never use completed-action language like "documented", "implemented", "created", "updated", "fixed", or "verified" unless an actual tool/action performed it.
+- If uncertainty affects correctness, ask the user.
+- If uncertainty does NOT affect correctness, proceed with clearly labeled assumptions.
+- Be decisive, but not speculative.
+- If no real file/code/documentation tool was used, the result MUST NOT imply completion. Use words like drafted, proposed, outlined, or recommended.
+- If assigned_role is documenter and the task asks to document something, prefer staging a file_write instead of only describing the documentation.
+- file_write.should_stage may only be true when filename and content are both provided.
+- For existing docs like AGENTS.md, PROJECT_STATUS.md, MEMORY.md, SOUL.md, IDENTITY.md, and OPERATING_MODEL.md, prefer file_write.mode = append unless the task explicitly says to replace the file.
+- Keep result and next_action concise.
+"""
+
+async def call_ollama(messages, temperature=0.2, model=MODEL):
+    client = ollama.AsyncClient(timeout=120.0)
+    r = await client.chat(
+        model=model,
+        messages=messages,
+        stream=False,
+        options={"num_ctx": 8192, "temperature": temperature}
+    )
+    return r["message"]["content"]
+
+async def call_ollama_stream(messages, msg, temperature=0.2):
+    client = ollama.AsyncClient(timeout=120.0)
+    full = ""
+    async for part in await client.chat(
+        model=MODEL,
+        messages=messages,
+        stream=True,
+        options={"num_ctx": 8192, "temperature": temperature}
+    ):
+        token = part["message"]["content"]
+        full += token
+        await msg.stream_token(token)
+    return full
+
+def clean_json_text(text: str):
+    text = text.strip()
+
+    if text.startswith("```json"):
+        text = text.replace("```json", "", 1).strip()
+
+    if text.startswith("```"):
+        text = text.replace("```", "", 1).strip()
+
+    if text.endswith("```"):
+        text = text[:-3].strip()
+
+    return text
+
+def parse_json_or_none(text: str):
+    try:
+        return json.loads(clean_json_text(text))
+    except:
+        return None
+
+async def run_task(task):
+    update_task(task["task_id"], {"status": "running"})
+
+    system_prompt = build_system_prompt(task["goal"], structured=True)
+
+    # Inject grounding context
+    system_prompt += f"""
+
+=== CURRENT PROJECT STATE ===
+{load_file("PROJECT_STATUS.md")}
+
+=== OPERATING MODEL ===
+{load_file("OPERATING_MODEL.md")}
+
+Rules:
+- You MUST base decisions on the current Leo system.
+- Do NOT give generic AI best practices.
+- All outputs must be specific to Leo's architecture and current build state.
+"""
+    task_prompt = build_task_prompt(task)
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": task_prompt}
+    ]
+
+    raw = await call_ollama(messages, temperature=0.1)
+    parsed = parse_json_or_none(raw)
+
+    if parsed is None:
+        repair = await call_ollama([
+            {"role": "system", "content": "Repair invalid JSON. Output ONLY valid JSON. No markdown."},
+            {"role": "user", "content": raw}
+        ], temperature=0.0)
+        parsed = parse_json_or_none(repair)
+
+    if parsed is None:
+        return update_task(task["task_id"], {
+            "status": "blocked",
+            "result": raw,
+            "next_action": "JSON parsing failed. Review raw output.",
+            "needs_user": True
+        })
+
+    final_status = parsed.get("status", "done")
+    if final_status not in ["done", "blocked", "needs_user"]:
+        final_status = "done"
+
+    return update_task(task["task_id"], {
+        "status": final_status,
+        "result": parsed.get("result"),
+        "next_action": parsed.get("next_action"),
+        "needs_user": parsed.get("needs_user", False),
+        "memory_candidate": parsed.get("memory_candidate"),
+        "file_write": parsed.get("file_write")
+    })
+
+@cl.on_chat_start
+async def start():
+    cl.user_session.set("history", [])
+    cl.user_session.set("pending_write", None)
+    await cl.Message(content=f"🚀 Leo ({MODEL}) + Task Runner online.").send()
+
+@cl.on_message
+async def main(message: cl.Message):
+    user_text = message.content.strip()
+
+
+    # ===== SAFE FILE WRITE TOOL =====
+
+    if user_text.startswith("/file write "):
+        rest = user_text.replace("/file write ", "", 1).strip()
+
+        if "\n" not in rest:
+            await cl.Message(content="Use this format:\n\n/file write FILENAME.md\nYour content here").send()
+            return
+
+        filename, content = rest.split("\n", 1)
+        filename = filename.strip()
+        content = content.strip()
+
+        if not filename or not content:
+            await cl.Message(content="Missing filename or content.").send()
+            return
+
+        try:
+            safe_knowledge_path(filename)
+        except Exception as e:
+            await cl.Message(content=f"Unsafe filename: {str(e)}").send()
+            return
+
+        stage_file_write(filename, content)
+        preview = content[:2000]
+
+        await cl.Message(content=f"""Proposed file write staged.
+
+File: {filename}
+
+Preview:
+---
+{preview}
+---
+
+To approve and write this file, run:
+/approve write
+
+To cancel, run:
+/cancel write""").send()
+        return
+
+
+    if user_text.startswith("/file append "):
+        rest = user_text.replace("/file append ", "", 1).strip()
+
+        if "\n" not in rest:
+            await cl.Message(content="Use this format:\n\n/file append FILENAME.md\nContent to append here").send()
+            return
+
+        filename, content = rest.split("\n", 1)
+        filename = filename.strip()
+        content = content.strip()
+
+        if not filename or not content:
+            await cl.Message(content="Missing filename or content.").send()
+            return
+
+        try:
+            safe_knowledge_path(filename)
+        except Exception as e:
+            await cl.Message(content=f"Unsafe filename: {str(e)}").send()
+            return
+
+        stage_file_write(filename, "__APPEND__" + content)
+        preview = content[:2000]
+
+        await cl.Message(content=f"""Proposed file append staged.
+
+File: {filename}
+
+Append Preview:
+---
+{preview}
+---
+
+To approve and append this content, run:
+/approve write
+
+To cancel, run:
+/cancel write""").send()
+        return
+
+    if user_text == "/approve write":
+        pending = get_pending_write()
+
+        if not pending:
+            await cl.Message(content="No pending file write to approve.").send()
+            return
+
+        try:
+            file_path = safe_knowledge_path(pending["filename"])
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+
+            content = pending["content"]
+
+            if content.startswith("__APPEND__"):
+                mode = "a"
+                content = "\n\n" + content.replace("__APPEND__", "", 1).strip() + "\n"
+            else:
+                mode = "w"
+                content = content.strip() + "\n"
+
+            with open(file_path, mode, encoding="utf-8") as f:
+                f.write(content)
+
+            written = pending["filename"]
+            clear_pending_write()
+
+            await cl.Message(content=f"Wrote file: {written}").send()
+            return
+
+        except Exception as e:
+            await cl.Message(content=f"File write failed: {str(e)}").send()
+            return
+
+    if user_text == "/cancel write":
+        clear_pending_write()
+        await cl.Message(content="Cancelled pending file write.").send()
+        return
+
+
+    if user_text.startswith("/task add "):
+        goal = user_text.replace("/task add ", "", 1).strip()
+        task = create_task(goal)
+        await cl.Message(content=f"✅ Task added\nID: `{task['task_id']}`\nGoal: {task['goal']}").send()
+        return
+
+    if user_text == "/task list":
+        tasks = load_tasks().get("tasks", [])
+        if not tasks:
+            await cl.Message(content="No tasks yet.").send()
+            return
+        out = ["## Task Queue"]
+        for t in tasks:
+            out.append(f"`{t['task_id']}` — **{t['status']}**\nRole: {t['assigned_role']}\nGoal: {t['goal']}\nNext: {t.get('next_action')}")
+        await cl.Message(content="\n\n".join(out)).send()
+        return
+
+    if user_text == "/task run next":
+        task = get_next_pending_task()
+        if not task:
+            await cl.Message(content="No pending tasks to run.").send()
+            return
+
+        await cl.Message(content=f"Running task `{task['task_id']}`...").send()
+        updated = await run_task(task)
+
+        await cl.Message(content=f"""✅ Task run complete
+
+ID: `{updated['task_id']}`
+Status: **{updated['status']}**
+Result: {updated.get('result')}
+Next action: {updated.get('next_action')}""").send()
+
+        fw = updated.get("file_write") or {}
+        if fw.get("should_stage") and fw.get("filename") and fw.get("content"):
+            content = fw["content"]
+            if fw.get("mode") == "append":
+                content = "__APPEND__" + content
+            stage_file_write(fw["filename"], content)
+            action_word = "append" if fw.get("mode") == "append" else "write"
+            await cl.Message(content=f"""Proposed file {action_word} staged from task.
+
+Operation: {action_word.upper()}
+File: {fw["filename"]}
+
+Preview:
+---
+{fw["content"][:2000]}
+---
+
+To approve this {action_word}, run:
+/approve write
+
+To cancel, run:
+/cancel write""").send()
+
+        return
+
+    if user_text.startswith("/task run "):
+        task_id = user_text.replace("/task run ", "", 1).strip()
+        task = get_task(task_id)
+
+        if not task:
+            await cl.Message(content=f"No task found with ID `{task_id}`.").send()
+            return
+
+        await cl.Message(content=f"Running task `{task['task_id']}`...").send()
+        updated = await run_task(task)
+
+        await cl.Message(content=f"""✅ Task run complete
+
+ID: `{updated['task_id']}`
+Status: **{updated['status']}**
+Result: {updated.get('result')}
+Next action: {updated.get('next_action')}""").send()
+
+        fw = updated.get("file_write") or {}
+        if fw.get("should_stage") and fw.get("filename") and fw.get("content"):
+            content = fw["content"]
+            if fw.get("mode") == "append":
+                content = "__APPEND__" + content
+            stage_file_write(fw["filename"], content)
+            action_word = "append" if fw.get("mode") == "append" else "write"
+            await cl.Message(content=f"""Proposed file {action_word} staged from task.
+
+Operation: {action_word.upper()}
+File: {fw["filename"]}
+
+Preview:
+---
+{fw["content"][:2000]}
+---
+
+To approve this {action_word}, run:
+/approve write
+
+To cancel, run:
+/cancel write""").send()
+
+        return
+
+    history = cl.user_session.get("history") or []
+    structured = wants_structured(user_text)
+
+    if user_text.lower().startswith("/agent"):
+        user_text = user_text[len("/agent"):].strip()
+
+    system_prompt = build_system_prompt(user_text, structured)
+    messages = [{"role": "system", "content": system_prompt}]
+    messages.extend(history[-MAX_HISTORY_MESSAGES:])
+    messages.append({"role": "user", "content": user_text})
+
+    msg = cl.Message(content="")
+    await msg.send()
+
+    try:
+        if structured:
+            raw = await call_ollama(messages, temperature=0.1)
+            parsed = parse_json_or_none(raw)
+            if parsed:
+                full = json.dumps(parsed, indent=2)
+                await msg.stream_token("```json\n" + full + "\n```")
+
+                next_agent = parsed.get("next_agent", "none")
+                action = parsed.get("action", "")
+
+                if next_agent and next_agent != "none" and action:
+                    task = create_task(
+                        goal=action,
+                        assigned_role=next_agent,
+                        requested_by="agent",
+                        inputs={
+                            "source": "/agent",
+                            "parent_result": parsed
+                        }
+                    )
+
+                    await cl.Message(
+                        content=f"🧩 Created follow-up task `{task['task_id']}` for role `{next_agent}`.\nGoal: {action}"
+                    ).send()
+            else:
+                full = raw
+                await msg.stream_token(raw)
+        else:
+            full = await call_ollama_stream(messages, msg)
+
+        history.append({"role": "user", "content": user_text})
+        history.append({"role": "assistant", "content": full})
+        cl.user_session.set("history", history[-MAX_HISTORY_MESSAGES:])
+        await msg.update()
+
+    except Exception as e:
+        await cl.Message(content=f"Error: {str(e)}").send()

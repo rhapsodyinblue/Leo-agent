@@ -8,6 +8,8 @@ Standing workflow for Codex work on `rhapsodyinblue/Leo-agent`.
 - Codex should edit, not broadly explore.
 - ChatGPT and Caleb handle architecture, planning, and prompt shaping.
 - Caleb's Mac Studio is runtime truth for Leo.
+- Optimize for maintaining momentum rather than maximizing one-shot perfection.
+- Prefer iterative refinement loops: observe, refine, patch, validate, repeat.
 
 ## Permission Limitations
 
@@ -23,6 +25,7 @@ Standing workflow for Codex work on `rhapsodyinblue/Leo-agent`.
 - Create one task-specific branch.
 - Keep one PR per task.
 - Do not merge PRs unless Caleb explicitly says to merge.
+- Avoid stacking multiple unmerged PRs touching the same subsystem unless explicitly requested.
 
 Recommended command shape:
 
@@ -46,11 +49,29 @@ gh pr create --base main --head <task-branch> --title "..." --body "..."
 ## Editing Rules
 
 - Summarize the intended change before editing.
+- Before modifying files, state the intended files to modify, expected behavior impact, expected risk level, and validation plan.
 - Modify only files required for the task.
 - Never touch `app.py` unless the task explicitly requires it.
 - Prefer documentation, maps, and cleanup before risky refactors.
 - Keep PRs small and reviewable.
 - Do not combine unrelated cleanup, refactor, behavior, and docs work in one PR.
+- Prefer small diffs, isolated changes, one subsystem at a time, and minimal unrelated formatting changes.
+- Do not invent missing architecture or assume undocumented runtime behavior.
+- Refactors should default to behavior-preserving changes unless explicitly instructed otherwise.
+- Avoid silent logic changes during cleanup or refactor tasks.
+
+## Stop Conditions
+
+Stop and ask before continuing when:
+
+- The task scope expands beyond the original request.
+- `app.py` requires broad inspection outside requested ranges.
+- Multiple subsystems appear affected.
+- Runtime behavior cannot be confidently inferred statically.
+- A change may alter task queue, CREATE flow, memory flow, or approval safety behavior.
+- More than 3 files would need modification for a supposedly small task.
+- The correct architecture direction is unclear.
+- The available evidence is too thin; request clarification or narrower inspection instead of guessing.
 
 ## Token Budget Rules
 
@@ -60,6 +81,7 @@ gh pr create --base main --head <task-branch> --title "..." --body "..."
 - Do not restate large file contents.
 - Ask before expanding scope.
 - Avoid whole-file reads of `app.py` unless truly necessary.
+- If uncertain, request narrower inspection instead of broad exploration.
 
 Preferred inspection pattern:
 
@@ -72,6 +94,8 @@ sed -n '<start>,<end>p' app.py
 
 - Codex may run static checks when available.
 - Chainlit and Ollama runtime validation happen on Caleb's Mac Studio.
+- Static code understanding is not equivalent to verified runtime behavior.
+- Caleb's Mac Studio runtime environment is the final source of truth.
 - If Codex cannot validate something, clearly say so.
 - When local runtime validation is needed, provide exact commands for Caleb to run.
 

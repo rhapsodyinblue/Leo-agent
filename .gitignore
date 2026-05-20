@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.pyc
+
+# Virtual environments
+leo-agent-env/
+venv/
+.venv/
+
+# macOS
+.DS_Store
+
+# Backups / archives
+*.zip
+*.bak
+*.backup
+
+# Chainlit local state
+.chainlit/
+
+# Environment variables
+.env

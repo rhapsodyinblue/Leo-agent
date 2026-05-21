@@ -6454,9 +6454,13 @@ PRESERVE:
 TASK:
 <runner-ready one-file BUILD task prompt>
 
-The TASK section must include this exact implementation-analysis requirement after the task description:
+IMPLEMENTATION_ANALYSIS is an executor artifact, not compile-time content.
+Do not generate IMPLEMENTATION_ANALYSIS content now.
+Do not include an IMPLEMENTATION_ANALYSIS: section in the compiled task.
 
-Before editing, produce IMPLEMENTATION_ANALYSIS documenting:
+The TASK section must include this exact implementation-analysis instruction after the task description:
+
+Execution requirement: before editing, the BUILD runner must produce an IMPLEMENTATION_ANALYSIS artifact documenting:
 - task interpretation
 - approaches considered
 - chosen approach

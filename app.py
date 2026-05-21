@@ -397,6 +397,29 @@ def normalize_task_prerequisites(prerequisites):
     return normalized
 
 
+def normalize_task_dependency_titles(depends_on):
+    if not depends_on:
+        return []
+
+    if isinstance(depends_on, str):
+        depends_on = [depends_on]
+
+    if not isinstance(depends_on, list):
+        return []
+
+    normalized = []
+    for item in depends_on:
+        title = str(item or "").strip()
+        if title:
+            normalized.append(title)
+
+    return normalized
+
+
+def canonicalize_dependency_title(title):
+    return " ".join(str(title or "").strip().lower().split())
+
+
 def resolve_task_file_path(task, file_name):
     file_name = (file_name or "").strip()
 
@@ -5505,26 +5528,28 @@ Raw output:
                         if isinstance(item, str) and item.strip():
                             f.write(f"- {item.strip()}\n")
 
+            queue_batch_id = str(uuid.uuid4())[:8]
             created = []
-            for item in tasks_list[:50]:
+            created_entries = []
+            for queue_order, item in enumerate(tasks_list[:50], start=1):
                 task_goal = ""
                 file_path = ""
+                task_title = ""
+                depends_on_titles = []
+                prerequisites = []
 
                 if isinstance(item, str):
                     task_goal = item.strip()
+                    task_title = task_goal
 
                 elif isinstance(item, dict):
                     title = (item.get("task") or item.get("goal") or item.get("title") or "").strip()
                     file_path = (item.get("target_file") or item.get("file_path") or item.get("file") or "").strip()
                     acceptance = (item.get("acceptance_criteria") or item.get("acceptance") or "").strip()
-                    depends_on = item.get("depends_on") or []
+                    depends_on_titles = normalize_task_dependency_titles(item.get("depends_on"))
                     prerequisites = normalize_task_prerequisites(item.get("prerequisites"))
                     why_now = (item.get("why_now") or item.get("sequence_reason") or "").strip()
-
-                    if isinstance(depends_on, str):
-                        depends_on = [depends_on]
-                    if not isinstance(depends_on, list):
-                        depends_on = []
+                    task_title = title
 
                     parts = []
                     if title:
@@ -5533,8 +5558,8 @@ Raw output:
                         parts.append(f"Target file: {file_path}")
                     if acceptance:
                         parts.append(f"Acceptance criteria: {acceptance}")
-                    if depends_on:
-                        parts.append("Depends on: " + "; ".join(str(x).strip() for x in depends_on if str(x).strip()))
+                    if depends_on_titles:
+                        parts.append("Depends on: " + "; ".join(depends_on_titles))
                     if prerequisites:
                         prereq_bits = []
                         for prereq in prerequisites:
@@ -5548,6 +5573,7 @@ Raw output:
                 if not task_goal:
                     continue
 
+                target_file = file_path or extract_task_target_file(task_goal)
                 task = create_task(
                     task_goal,
                     assigned_role="leader",
@@ -5558,19 +5584,54 @@ Raw output:
                         "approved_plan_file": plan_rel_path,
                         "original_queue_task": task_goal,
                         "queue_task_created_at": datetime.now().isoformat(timespec="seconds"),
-                        "depends_on": depends_on if 'depends_on' in locals() else [],
-                        "prerequisites": prerequisites if 'prerequisites' in locals() else [],
+                        "depends_on": depends_on_titles,
+                        "depends_on_titles": depends_on_titles,
+                        "depends_on_task_ids": [],
+                        "prerequisites": prerequisites,
+                        "queue_batch_id": queue_batch_id,
+                        "queue_order": queue_order,
                         "read_before_modify": plan_rel_path,
-                        "target_file": file_path or extract_task_target_file(task_goal),
+                        "target_file": target_file,
                         "tool_limits": {
                             "file_reads": "unlimited",
                             "max_file_writes": 1,
-                            "writable_files": [file_path or extract_task_target_file(task_goal)] if (file_path or extract_task_target_file(task_goal)) else [],
+                            "writable_files": [target_file] if target_file else [],
                             "allow_multi_file_output": False
                         }
                     }
                 )
                 created.append(task)
+                created_entries.append({
+                    "task": task,
+                    "title": task_title,
+                    "depends_on_titles": depends_on_titles,
+                    "queue_order": queue_order
+                })
+
+            for idx, entry in enumerate(created_entries):
+                resolved_dependency_ids = []
+                dependency_titles = entry.get("depends_on_titles") or []
+
+                if dependency_titles:
+                    earlier_entries = created_entries[:idx]
+                    earlier_title_map = {
+                        canonicalize_dependency_title(e.get("title")): e.get("task", {}).get("task_id")
+                        for e in earlier_entries
+                        if canonicalize_dependency_title(e.get("title")) and e.get("task", {}).get("task_id")
+                    }
+
+                    for dependency_title in dependency_titles:
+                        resolved_id = earlier_title_map.get(canonicalize_dependency_title(dependency_title))
+                        if resolved_id:
+                            resolved_dependency_ids.append(resolved_id)
+
+                update_task(entry["task"]["task_id"], {
+                    "inputs": {
+                        **(entry["task"].get("inputs") or {}),
+                        "depends_on_task_ids": resolved_dependency_ids
+                    }
+                })
+                entry["task"]["inputs"]["depends_on_task_ids"] = resolved_dependency_ids
 
             if not created:
                 await cl.Message(content=f"""Create build-queue failed: no valid task goals were created.

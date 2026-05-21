@@ -149,6 +149,21 @@ def clear_pending_write():
     cl.user_session.set("pending_write", None)
 
 
+def enrich_pending_write_from_task(pending, task):
+    if not pending:
+        return None
+
+    task_inputs = task.get("inputs", {}) or {}
+    pending["task_id"] = task.get("task_id")
+    pending["task_goal"] = task.get("goal")
+    pending["original_task"] = task_inputs.get("original_queue_task") or task_inputs.get("source_task_goal") or task.get("goal")
+    pending["source_task_id"] = task_inputs.get("source_task_id")
+    pending["approved_create_project"] = task_inputs.get("approved_create_project")
+    pending["approved_plan_file"] = task_inputs.get("approved_plan_file")
+    pending["task_inputs"] = task_inputs
+    return pending
+
+
 def append_build_doc_intake(project_slug, original_task, filename, operation, source_task_id=None):
     if not project_slug:
         return
@@ -7419,15 +7434,8 @@ The candidate should preserve baseline facts unless the task intentionally chang
             stage_file_operation(filename, content, operation=operation, reason=reason)
 
             pending = get_pending_write()
+            pending = enrich_pending_write_from_task(pending, task)
             if pending:
-                task_inputs = task.get("inputs", {}) or {}
-                pending["task_id"] = task.get("task_id")
-                pending["task_goal"] = task.get("goal")
-                pending["original_task"] = task_inputs.get("original_queue_task") or task_inputs.get("source_task_goal") or task.get("goal")
-                pending["source_task_id"] = task_inputs.get("source_task_id")
-                pending["approved_create_project"] = task_inputs.get("approved_create_project")
-                pending["approved_plan_file"] = task_inputs.get("approved_plan_file")
-                pending["task_inputs"] = task_inputs
                 cl.user_session.set("pending_write", pending)
 
             await cl.Message(content=f"""Proposed file operation staged from task.
@@ -8092,15 +8100,8 @@ The candidate should preserve baseline facts unless the task intentionally chang
             stage_file_operation(filename, content, operation=operation, reason=reason)
 
             pending = get_pending_write()
+            pending = enrich_pending_write_from_task(pending, task)
             if pending:
-                task_inputs = task.get("inputs", {}) or {}
-                pending["task_id"] = task.get("task_id")
-                pending["task_goal"] = task.get("goal")
-                pending["original_task"] = task_inputs.get("original_queue_task") or task_inputs.get("source_task_goal") or task.get("goal")
-                pending["source_task_id"] = task_inputs.get("source_task_id")
-                pending["approved_create_project"] = task_inputs.get("approved_create_project")
-                pending["approved_plan_file"] = task_inputs.get("approved_plan_file")
-                pending["task_inputs"] = task_inputs
                 cl.user_session.set("pending_write", pending)
 
             await cl.Message(content=f"""Proposed file operation staged from task.

@@ -11,12 +11,19 @@ import ollama
 import chainlit as cl
 from validation_syntax import validate_proposed_code_syntax
 from validation_baselines import (
+    baseline_missing_items_unexplained_by_mode,
     compare_target_file_baselines,
     detect_file_kind,
+    format_unexplained_baseline_report,
     generate_target_file_baseline,
     parse_target_file_baseline_text,
 )
 from validation_static import validate_react_static_behavior_contract
+from validation_runtime_js import (
+    check_validation_js_contract,
+    extract_validation_js,
+    validate_js_snippet,
+)
 
 MODEL = "leo-build"
 ESCALATION_MODEL = "qwen2.5-coder:14b"
@@ -1384,100 +1391,6 @@ def extract_expected_after(text):
     return match.group(1).strip()
 
 
-def extract_validation_js(text):
-    text = text or ""
-    m = re.search(
-        r"VALIDATION_JS:\s*(.*?)(?=\nCONTENT:|\nSTATUS:|\Z)",
-        text,
-        flags=re.DOTALL | re.IGNORECASE
-    )
-    if not m:
-        return ""
-
-    snippet = m.group(1).strip()
-
-    if snippet.startswith("```"):
-        snippet = re.sub(r"^```[a-zA-Z0-9_-]*\n?", "", snippet)
-        snippet = re.sub(r"\n?```$", "", snippet).strip()
-
-    # Strip loose language labels like:
-    # VALIDATION_JS:
-    # javascript
-    # const x = ...
-    snippet = re.sub(r"^(javascript|js)\s*\n", "", snippet, flags=re.IGNORECASE).strip()
-
-    return snippet
-
-
-def validate_js_snippet(snippet, timeout_seconds=8):
-    snippet = snippet or ""
-
-    if not snippet.strip():
-        return {
-            "success": False,
-            "stdout": "",
-            "stderr": "No JavaScript snippet provided.",
-            "exit_code": 1
-        }
-
-    temp_path = None
-
-    try:
-        with tempfile.NamedTemporaryFile(
-            suffix=".js",
-            delete=False,
-            mode="w",
-            encoding="utf-8"
-        ) as f:
-            f.write(snippet)
-            temp_path = f.name
-
-        result = subprocess.run(
-            ["node", temp_path],
-            capture_output=True,
-            text=True,
-            timeout=timeout_seconds
-        )
-
-        return {
-            "success": result.returncode == 0,
-            "stdout": result.stdout.strip(),
-            "stderr": result.stderr.strip(),
-            "exit_code": result.returncode
-        }
-
-    except FileNotFoundError:
-        return {
-            "success": False,
-            "stdout": "",
-            "stderr": "Node.js is not installed or not available on PATH.",
-            "exit_code": 127
-        }
-
-    except subprocess.TimeoutExpired:
-        return {
-            "success": False,
-            "stdout": "",
-            "stderr": f"Validation timed out after {timeout_seconds} seconds.",
-            "exit_code": 124
-        }
-
-    except Exception as e:
-        return {
-            "success": False,
-            "stdout": "",
-            "stderr": str(e),
-            "exit_code": 1
-        }
-
-    finally:
-        if temp_path:
-            try:
-                Path(temp_path).unlink(missing_ok=True)
-            except Exception:
-                pass
-
-
 def parse_build_response(text):
     text = text or ""
 
@@ -1755,39 +1668,6 @@ def extract_preservation_anchors(filename, max_anchors=60):
         return f"[Could not extract preservation anchors for {filename}: {e}]"
 
 
-
-
-def check_validation_js_contract(snippet):
-    snippet = snippet or ""
-    lowered = snippet.lower()
-
-    forbidden_patterns = [
-        ("React import/require", r"\brequire\s*\(\s*['\"]react['\"]\s*\)|\bfrom\s+['\"]react['\"]|\bimport\s+react\b"),
-        ("Project file import/require", r"\brequire\s*\(\s*['\"]\./|\brequire\s*\(\s*['\"]\.\./|\bfrom\s+['\"]\./|\bfrom\s+['\"]\.\./"),
-        ("JSX syntax", r"<[A-Z][A-Za-z0-9_]*\b|<[a-z]+[\s>][\s\S]*</[a-z]+>"),
-        ("Jest/test syntax", r"\btest\s*\(|\bit\s*\(|\bexpect\s*\(|\bjest\."),
-        ("Testing Library/render", r"@testing-library|render\s*\("),
-        ("DOM/browser API", r"\bdocument\.|\bwindow\.|\bReactDOM\b"),
-        ("Hooks/component execution", r"\buseState\s*\(|\buseEffect\s*\("),
-    ]
-
-    violations = []
-    for label, pattern in forbidden_patterns:
-        if re.search(pattern, snippet, flags=re.IGNORECASE):
-            violations.append(label)
-
-    if violations:
-        return False, (
-            "VALIDATION_JS contract violation. "
-            "VALIDATION_JS must be standalone Node-compatible JavaScript that directly exercises changed logic. "
-            "Do not use React, JSX, imports/requires of project files, Jest, Testing Library, DOM APIs, or hooks. "
-            "Violations: " + ", ".join(sorted(set(violations)))
-        )
-
-    if "console.log" not in snippet:
-        return False, "VALIDATION_JS must print concrete runtime evidence using console.log."
-
-    return True, ""
 
 
 def strip_code_fence(text):
@@ -2428,105 +2308,6 @@ def extract_intentional_adaptations(text):
         flags=re.DOTALL | re.IGNORECASE
     )
     return match.group(1).strip() if match else ""
-
-
-def baseline_missing_items_unexplained_by_mode(
-    baseline_diff,
-    reason_text,
-    expected_after_text,
-    edit_mode="surgical",
-    task_goal="",
-    result_text="",
-    intentional_adaptations_text=""
-):
-    """
-    Returns missing baseline items that remain unexplained under the active edit mode.
-    """
-    if not isinstance(baseline_diff, dict):
-        return {}
-
-    missing = baseline_diff.get("missing") or {}
-    if not missing:
-        return {}
-
-    edit_mode = (edit_mode or "surgical").lower().strip()
-
-    if edit_mode == "replacement":
-        return {}
-
-    if edit_mode == "surgical":
-        # Surgical mode means preservation-first. Missing baseline behavior is treated as unexplained.
-        return missing
-
-    explanation_text = "\n".join([
-        reason_text or "",
-        expected_after_text or "",
-        task_goal or "",
-        result_text or "",
-        intentional_adaptations_text or ""
-    ]).lower()
-
-    def item_terms(item):
-        raw = str(item or "").strip()
-        low = raw.lower()
-        terms = {low}
-
-        if "." in low:
-            terms.add(low.split(".")[-1])
-
-        terms.add(low.replace(":", "").strip())
-
-        bracket_base = low.split("[", 1)[0].replace("`", "").strip()
-        if bracket_base:
-            terms.add(bracket_base)
-
-        return {t for t in terms if t}
-
-    unexplained = {}
-
-    for field, items in missing.items():
-        still_unexplained = []
-
-        for item in items:
-            terms = item_terms(item)
-            explained = any(term and term in explanation_text for term in terms)
-
-            if edit_mode == "refactor":
-                # Refactor mode may alter implementation, but visible behavior remains protected.
-                visible_fields = {
-                    "rendered_labels_headings",
-                    "input_names",
-                    "input_values",
-                    "mapped_collections"
-                }
-                if field in visible_fields:
-                    explained = False
-
-            if not explained:
-                still_unexplained.append(item)
-
-        if still_unexplained:
-            unexplained[field] = still_unexplained
-
-    return unexplained
-
-
-def format_unexplained_baseline_report(original_report, unexplained):
-    lines = [
-        "TARGET_FILE_BASELINE_DIFF:",
-        "preservation_ok: False",
-        "unexplained_missing_from_after:"
-    ]
-
-    for field, items in unexplained.items():
-        lines.append(f"- {field}: {items}")
-
-    lines.append("")
-    lines.append("Original baseline report:")
-    lines.append(original_report or "No baseline report available.")
-
-    return "\n".join(lines)
-
 
 
 async def repair_full_candidate_baseline_preservation(filename, task_goal, original_content, candidate_content, baseline_report, expected_after=""):

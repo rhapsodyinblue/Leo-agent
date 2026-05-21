@@ -22,10 +22,11 @@ Standing workflow for Codex work on `rhapsodyinblue/Leo-agent`.
 - Never work directly on `main`.
 - Start with clean `git status`.
 - Pull `main` only before edits.
-- Create one task-specific branch.
+- Create one task-specific branch from `main` unless stacking is explicitly requested.
 - Keep one PR per task.
 - Do not merge PRs unless Caleb explicitly says to merge.
 - Avoid stacking multiple unmerged PRs touching the same subsystem unless explicitly requested.
+- PRs should normally target `main`.
 
 Recommended command shape:
 
@@ -45,6 +46,26 @@ git commit -m "<clear message>"
 git push -u origin <task-branch>
 gh pr create --base main --head <task-branch> --title "..." --body "..."
 ```
+
+## Branch And PR Base Rules
+
+- Default branch strategy:
+  - new work branches should normally branch from `main`
+  - PRs should normally target `main`
+  - avoid stacked branches unless explicitly requested
+- Before opening a PR, verify:
+  - current branch
+  - intended base branch
+  - expected diff scope
+- If the current branch is not based on `main`, warn before opening the PR and report:
+  - which branch it appears to be based on
+  - the risk of polluted diffs or hidden dependency merges
+- One PR equals one purpose. Unexpected files or unrelated commits should trigger review before PR creation.
+- When opening a PR, explicitly report:
+  - head branch
+  - base branch
+  - expected changed files
+- Do not merge into non-`main` branches unless explicitly requested.
 
 ## Editing Rules
 

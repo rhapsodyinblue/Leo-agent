@@ -532,6 +532,29 @@ def get_next_runnable_task_with_prereq_check():
 
     return None, blocked
 
+
+def get_next_runnable_task_for_project_with_prereq_check(project_slug):
+    data = load_tasks()
+    blocked = []
+
+    for task in data.get("tasks", []):
+        if task.get("status") != "pending":
+            continue
+
+        task_inputs = task.get("inputs") or {}
+        if task_inputs.get("approved_create_project") != project_slug:
+            continue
+
+        prereq_result = check_task_prerequisites(task)
+
+        if prereq_result.get("ok"):
+            return task, blocked
+
+        blocked_task = block_task_for_failed_prerequisites(task, prereq_result)
+        blocked.append(blocked_task or task)
+
+    return None, blocked
+
 def get_task(task_id):
     data = load_tasks()
     for task in data.get("tasks", []):
@@ -7315,6 +7338,46 @@ To cancel, run:
 /cancel write""").send()
 
         return
+
+    if user_text == "/create run-next":
+        project_slug = cl.user_session.get("active_create_project")
+
+        if not project_slug:
+            await cl.Message(content="No active CREATE project. Use `/create use <project_slug>` first.").send()
+            return
+
+        task, blocked = get_next_runnable_task_for_project_with_prereq_check(project_slug)
+        if not task:
+            if blocked:
+                lines = []
+                for b in blocked:
+                    lines.append(f"- `{b.get('task_id')}` — {b.get('goal', '')[:160]}")
+                await cl.Message(content=f"""No runnable pending tasks for active CREATE project `{project_slug}`.
+
+Blocked by failed prerequisites:
+{chr(10).join(lines)}
+
+Next:
+- Run `/task list`
+- Complete prerequisite tasks first
+- Or manually reset a blocked task after fixing prerequisites""").send()
+            else:
+                await cl.Message(content=f"No runnable pending tasks for active CREATE project `{project_slug}`.").send()
+            return
+
+        if blocked:
+            lines = []
+            for b in blocked:
+                lines.append(f"- `{b.get('task_id')}` — {b.get('goal', '')[:160]}")
+            await cl.Message(content=f"""Skipped {len(blocked)} blocked prerequisite task(s) for active CREATE project `{project_slug}`.
+
+{chr(10).join(lines)}
+
+Running project-scoped task `{task['task_id']}`...""").send()
+        else:
+            await cl.Message(content=f"Running next pending task for active CREATE project `{project_slug}`: `{task['task_id']}`...").send()
+
+        user_text = f"/task run {task['task_id']}"
 
     if user_text.startswith("/task run "):
         task_id = user_text.replace("/task run ", "", 1).strip()

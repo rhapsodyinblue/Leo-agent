@@ -81,6 +81,13 @@ gh pr create --base main --head <task-branch> --title "..." --body "..."
   - expected changed files
 - Do not merge into non-`main` branches unless explicitly requested.
 
+## Permission And Lock Handling
+
+- If `git fetch`, `git merge --ff-only`, `git add`, or `git commit` fails because of permission or lock issues, retry once with elevated access if available.
+- Do not retry endlessly.
+- If `.git/index.lock` appears to exist, check whether a git process is active before removing it.
+- Never remove lock files blindly.
+
 ## Editing Rules
 
 - Summarize the intended change before editing.
@@ -140,6 +147,13 @@ Common local command:
 chainlit run app.py
 ```
 
+## Compile And Pycache Handling
+
+- First try the requested Python compile command.
+- If it fails only because of pycache permission issues, retry with `PYTHONPYCACHEPREFIX=.pycache_local`.
+- Clearly report whether the failure was a code or syntax failure, or only a pycache or environment issue.
+- Do not treat pycache permission failure as code failure.
+
 ## Output Style
 
 Final responses should include:
@@ -149,3 +163,9 @@ Final responses should include:
 - Tests or checks run.
 - Tests or checks not run, if relevant.
 - Exact local validation commands for Caleb when needed.
+
+## Path Reporting
+
+- Report repo-relative paths only.
+- Prefer `app.py`, `docs/CODEX_OPERATING_RULES.md`, `validation_static.py`, and similar repo-relative names.
+- Avoid absolute local workspace paths in final summaries unless specifically needed for debugging.

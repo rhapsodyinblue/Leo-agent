@@ -555,6 +555,73 @@ def get_next_runnable_task_for_project_with_prereq_check(project_slug):
 
     return None, blocked
 
+def check_task_dependencies(task, task_by_id):
+    inputs = task.get("inputs") or {}
+    dependency_ids = [str(x).strip() for x in (inputs.get("depends_on_task_ids") or []) if str(x).strip()]
+
+    if not dependency_ids:
+        return {"ok": True, "failures": [], "checked": []}
+
+    failures = []
+    checked = []
+
+    for dep_id in dependency_ids:
+        dependency_task = task_by_id.get(dep_id)
+        checked.append({
+            "task_id": dep_id,
+            "status": dependency_task.get("status") if dependency_task else None
+        })
+
+        if not dependency_task:
+            failures.append({
+                "task_id": dep_id,
+                "reason": "missing_dependency_id"
+            })
+            continue
+
+        if dependency_task.get("status") != "done":
+            failures.append({
+                "task_id": dep_id,
+                "reason": f"dependency_not_done:{dependency_task.get('status')}"
+            })
+
+    return {"ok": not failures, "failures": failures, "checked": checked}
+
+
+def get_next_runnable_task_for_project_with_dependency_check(project_slug):
+    data = load_tasks()
+    blocked_prerequisites = []
+    blocked_dependencies = []
+    task_by_id = {
+        task.get("task_id"): task
+        for task in data.get("tasks", [])
+        if task.get("task_id")
+    }
+
+    for task in data.get("tasks", []):
+        if task.get("status") != "pending":
+            continue
+
+        task_inputs = task.get("inputs") or {}
+        if task_inputs.get("approved_create_project") != project_slug:
+            continue
+
+        dependency_result = check_task_dependencies(task, task_by_id)
+        if not dependency_result.get("ok"):
+            blocked_dependencies.append({
+                "task": task,
+                "failures": dependency_result.get("failures", [])
+            })
+            continue
+
+        prereq_result = check_task_prerequisites(task)
+        if prereq_result.get("ok"):
+            return task, blocked_prerequisites, blocked_dependencies
+
+        blocked_task = block_task_for_failed_prerequisites(task, prereq_result)
+        blocked_prerequisites.append(blocked_task or task)
+
+    return None, blocked_prerequisites, blocked_dependencies
 
 def evaluate_task_dependency_health(task, task_by_id):
     inputs = task.get("inputs") or {}
@@ -4615,6 +4682,103 @@ Appended evidence:
         await cl.Message(content=f"Active CREATE project set to `{project_slug}`.\nPlan file: `{rel_path}`").send()
         return
 
+    if user_text == "/create dependency-status":
+        project_slug = cl.user_session.get("active_create_project")
+
+        if not project_slug:
+            await cl.Message(content="No active CREATE project. Use `/create use <project_slug>` first.").send()
+            return
+
+        all_tasks = load_tasks().get("tasks", [])
+        project_tasks = []
+        task_by_id = {}
+
+        for task in all_tasks:
+            task_by_id[task.get("task_id")] = task
+            task_inputs = task.get("inputs") or {}
+            if task_inputs.get("approved_create_project") == project_slug:
+                project_tasks.append(task)
+
+        if not project_tasks:
+            await cl.Message(content=f"No CREATE tasks found for active project `{project_slug}`.").send()
+            return
+
+        def sort_key(task):
+            inputs = task.get("inputs") or {}
+            queue_order = inputs.get("queue_order")
+            try:
+                normalized_order = int(queue_order)
+            except Exception:
+                normalized_order = 10**9
+            return (
+                str(inputs.get("queue_batch_id") or "~"),
+                normalized_order,
+                task.get("created_at") or "",
+                task.get("task_id") or ""
+            )
+
+        project_tasks = sorted(project_tasks, key=sort_key)
+
+        summary_counts = {
+            "total": len(project_tasks),
+            "tasks_with_dependencies": 0,
+            "OK": 0,
+            "PENDING": 0,
+            "MISSING_ID": 0,
+            "STALE_ID": 0,
+            "NO_DEPS": 0
+        }
+
+        grouped = {}
+        for task in project_tasks:
+            inputs = task.get("inputs") or {}
+            batch_id = inputs.get("queue_batch_id") or "unbatched"
+            grouped.setdefault(batch_id, []).append(task)
+
+        out = [f"## CREATE Dependency Status — `{project_slug}`"]
+
+        for batch_id, batch_tasks in grouped.items():
+            out.append(f"### Batch `{batch_id}`")
+
+            for task in batch_tasks:
+                inputs = task.get("inputs") or {}
+                depends_on_titles = normalize_task_dependency_titles(inputs.get("depends_on_titles") or inputs.get("depends_on"))
+                depends_on_task_ids = [str(x).strip() for x in (inputs.get("depends_on_task_ids") or []) if str(x).strip()]
+                health = evaluate_task_dependency_health(task, task_by_id)
+
+                if depends_on_titles or depends_on_task_ids:
+                    summary_counts["tasks_with_dependencies"] += 1
+                summary_counts[health] += 1
+
+                goal_preview = " ".join(str(task.get("goal") or "").split())[:140]
+                queue_order = inputs.get("queue_order")
+                title_text = ", ".join(depends_on_titles) if depends_on_titles else "none"
+                ids_text = ", ".join(depends_on_task_ids) if depends_on_task_ids else "none"
+
+                out.append(
+                    f"`{task.get('task_id')}` — **{task.get('status')}** — {health}\n"
+                    f"Order: {queue_order if queue_order is not None else 'n/a'}\n"
+                    f"Goal: {goal_preview}\n"
+                    f"Depends on titles: {title_text}\n"
+                    f"Depends on ids: {ids_text}"
+                )
+
+        out.insert(
+            1,
+            "\n".join([
+                f"Total project tasks: {summary_counts['total']}",
+                f"Tasks with dependencies: {summary_counts['tasks_with_dependencies']}",
+                f"OK: {summary_counts['OK']}",
+                f"PENDING: {summary_counts['PENDING']}",
+                f"MISSING_ID: {summary_counts['MISSING_ID']}",
+                f"STALE_ID: {summary_counts['STALE_ID']}",
+                f"NO_DEPS: {summary_counts['NO_DEPS']}"
+            ])
+        )
+
+        await cl.Message(content="\n\n".join(out)).send()
+        return
+
 
     if user_text == "/create dependency-status":
         project_slug = cl.user_session.get("active_create_project")
@@ -7489,34 +7653,72 @@ To cancel, run:
             await cl.Message(content="No active CREATE project. Use `/create use <project_slug>` first.").send()
             return
 
-        task, blocked = get_next_runnable_task_for_project_with_prereq_check(project_slug)
+        task, blocked, dependency_blocked = get_next_runnable_task_for_project_with_dependency_check(project_slug)
         if not task:
-            if blocked:
-                lines = []
-                for b in blocked:
-                    lines.append(f"- `{b.get('task_id')}` — {b.get('goal', '')[:160]}")
+            if blocked or dependency_blocked:
+                sections = []
+
+                if dependency_blocked:
+                    dep_lines = []
+                    for item in dependency_blocked:
+                        dep_task = item.get("task") or {}
+                        failures = item.get("failures") or []
+                        reasons = []
+                        for failure in failures:
+                            reason = failure.get("reason") or "dependency_blocked"
+                            dep_id = failure.get("task_id") or "unknown"
+                            reasons.append(f"{dep_id} ({reason})")
+                        dep_lines.append(f"- `{dep_task.get('task_id')}` — " + "; ".join(reasons))
+                    sections.append("Blocked by unsatisfied dependencies:\n" + "\n".join(dep_lines))
+
+                if blocked:
+                    prereq_lines = []
+                    for b in blocked:
+                        prereq_lines.append(f"- `{b.get('task_id')}` — {b.get('goal', '')[:160]}")
+                    sections.append("Blocked by failed prerequisites:\n" + "\n".join(prereq_lines))
+
                 await cl.Message(content=f"""No runnable pending tasks for active CREATE project `{project_slug}`.
 
-Blocked by failed prerequisites:
-{chr(10).join(lines)}
+{chr(10).join(sections)}
 
 Next:
 - Run `/task list`
-- Complete prerequisite tasks first
-- Or manually reset a blocked task after fixing prerequisites""").send()
+- Complete dependency and prerequisite tasks first
+- Then run `/create dependency-status`
+- Or manually reset a prerequisite-blocked task after fixing prerequisites""").send()
             else:
                 await cl.Message(content=f"No runnable pending tasks for active CREATE project `{project_slug}`.").send()
             return
 
-        if blocked:
-            lines = []
-            for b in blocked:
-                lines.append(f"- `{b.get('task_id')}` — {b.get('goal', '')[:160]}")
-            await cl.Message(content=f"""Skipped {len(blocked)} blocked prerequisite task(s) for active CREATE project `{project_slug}`.
+        if blocked or dependency_blocked:
+            sections = []
 
-{chr(10).join(lines)}
+            if dependency_blocked:
+                dep_lines = []
+                for item in dependency_blocked:
+                    dep_task = item.get("task") or {}
+                    failures = item.get("failures") or []
+                    reasons = []
+                    for failure in failures:
+                        reason = failure.get("reason") or "dependency_blocked"
+                        dep_id = failure.get("task_id") or "unknown"
+                        reasons.append(f"{dep_id} ({reason})")
+                    dep_lines.append(f"- `{dep_task.get('task_id')}` — " + "; ".join(reasons))
+                sections.append(
+                    f"Skipped {len(dependency_blocked)} dependency-blocked task(s):\n" + "\n".join(dep_lines)
+                )
 
-Running project-scoped task `{task['task_id']}`...""").send()
+            if blocked:
+                prereq_lines = []
+                for b in blocked:
+                    prereq_lines.append(f"- `{b.get('task_id')}` — {b.get('goal', '')[:160]}")
+                sections.append(
+                    f"Skipped {len(blocked)} prerequisite-blocked task(s):\n" + "\n".join(prereq_lines)
+                )
+
+            await cl.Message(content=f"""{chr(10).join(sections)}
+
+Running project-scoped task `{task['task_id']}` for active CREATE project `{project_slug}`...""").send()
         else:
             await cl.Message(content=f"Running next pending task for active CREATE project `{project_slug}`: `{task['task_id']}`...").send()
 

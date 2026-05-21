@@ -6442,7 +6442,7 @@ When targeting an existing file:
 - avoid replacing working behavior with a narrower version of the file
 - build on the current structure instead of narrowing the file around only the new feature
 
-Return ONLY the final compiled BUILD task prompt text using this format:
+Return ONLY the final compiled BUILD task core using this format:
 
 TARGET_FILE:
 src/path/File.js
@@ -6454,24 +6454,11 @@ PRESERVE:
 TASK:
 <runner-ready one-file BUILD task prompt>
 
-IMPLEMENTATION_ANALYSIS is an executor artifact, not compile-time content.
-Do not generate IMPLEMENTATION_ANALYSIS content now.
-Do not include an IMPLEMENTATION_ANALYSIS: section in the compiled task.
-
-The TASK section must include this exact implementation-analysis instruction after the task description:
-
-Execution requirement: before editing, the BUILD runner must produce an IMPLEMENTATION_ANALYSIS artifact documenting:
-- task interpretation
-- approaches considered
-- chosen approach
-- rejected approaches
-- assumptions
-- state/data shape impact
-- handler impact
-- UI/input behavior impact
-- existing behavior impact
-- risks/tradeoffs
-- follow-up obligations
+The compiler output must include only TARGET_FILE, PRESERVE, and TASK.
+Do not include IMPLEMENTATION_ANALYSIS.
+Do not include Implementation Analysis.
+Do not include any Execution requirement block.
+Do not include acceptance criteria unless already required elsewhere.
 
 The PRESERVE section should include the most relevant anchors from the target-file preservation list, especially existing props, state/data keys, handlers, rendered sections, and interactions that should remain in the updated file.
 """
@@ -6485,6 +6472,32 @@ The PRESERVE section should include the most relevant anchors from the target-fi
                 model=COMPILER_MODEL,
                 temperature=0.15
             )
+
+            execution_requirement_block = """
+
+Execution requirement: before editing, the BUILD runner must produce an IMPLEMENTATION_ANALYSIS artifact documenting:
+- task interpretation
+- approaches considered
+- chosen approach
+- rejected approaches
+- assumptions
+- state/data shape impact
+- handler impact
+- UI/input behavior impact
+- existing behavior impact
+- risks/tradeoffs
+- follow-up obligations
+""".rstrip()
+
+            compiled_goal_core = (compiled_goal or "").strip()
+            analysis_marker = re.search(
+                r"(?im)^(Execution requirement:\s*before editing,.*IMPLEMENTATION_ANALYSIS artifact documenting:|IMPLEMENTATION_ANALYSIS:|Implementation Analysis:)\s*$",
+                compiled_goal_core
+            )
+            if analysis_marker:
+                compiled_goal_core = compiled_goal_core[:analysis_marker.start()].rstrip()
+
+            compiled_goal = f"{compiled_goal_core}{execution_requirement_block}"
 
             target_file = extract_task_target_file(compiled_goal) or source_target
 

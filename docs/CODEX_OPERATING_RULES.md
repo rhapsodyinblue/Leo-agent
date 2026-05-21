@@ -36,6 +36,20 @@ git pull
 git checkout -b <task-branch>
 ```
 
+Recommended fresh-branch update shape:
+
+```bash
+git fetch origin main
+git checkout main
+git pull --ff-only
+git checkout -b <task-branch>
+```
+
+- `git fetch origin main` updates remote knowledge before branching.
+- `git pull --ff-only` avoids unintended merge commits on `main`.
+- New task branches should start from current `main`.
+- This reduces stale-branch drift and hidden merge conflicts.
+
 After edits:
 
 ```bash

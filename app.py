@@ -11,8 +11,10 @@ import ollama
 import chainlit as cl
 from validation_syntax import validate_proposed_code_syntax
 from validation_baselines import (
+    baseline_missing_items_unexplained_by_mode,
     compare_target_file_baselines,
     detect_file_kind,
+    format_unexplained_baseline_report,
     generate_target_file_baseline,
     parse_target_file_baseline_text,
 )
@@ -2413,105 +2415,6 @@ def extract_intentional_adaptations(text):
         flags=re.DOTALL | re.IGNORECASE
     )
     return match.group(1).strip() if match else ""
-
-
-def baseline_missing_items_unexplained_by_mode(
-    baseline_diff,
-    reason_text,
-    expected_after_text,
-    edit_mode="surgical",
-    task_goal="",
-    result_text="",
-    intentional_adaptations_text=""
-):
-    """
-    Returns missing baseline items that remain unexplained under the active edit mode.
-    """
-    if not isinstance(baseline_diff, dict):
-        return {}
-
-    missing = baseline_diff.get("missing") or {}
-    if not missing:
-        return {}
-
-    edit_mode = (edit_mode or "surgical").lower().strip()
-
-    if edit_mode == "replacement":
-        return {}
-
-    if edit_mode == "surgical":
-        # Surgical mode means preservation-first. Missing baseline behavior is treated as unexplained.
-        return missing
-
-    explanation_text = "\n".join([
-        reason_text or "",
-        expected_after_text or "",
-        task_goal or "",
-        result_text or "",
-        intentional_adaptations_text or ""
-    ]).lower()
-
-    def item_terms(item):
-        raw = str(item or "").strip()
-        low = raw.lower()
-        terms = {low}
-
-        if "." in low:
-            terms.add(low.split(".")[-1])
-
-        terms.add(low.replace(":", "").strip())
-
-        bracket_base = low.split("[", 1)[0].replace("`", "").strip()
-        if bracket_base:
-            terms.add(bracket_base)
-
-        return {t for t in terms if t}
-
-    unexplained = {}
-
-    for field, items in missing.items():
-        still_unexplained = []
-
-        for item in items:
-            terms = item_terms(item)
-            explained = any(term and term in explanation_text for term in terms)
-
-            if edit_mode == "refactor":
-                # Refactor mode may alter implementation, but visible behavior remains protected.
-                visible_fields = {
-                    "rendered_labels_headings",
-                    "input_names",
-                    "input_values",
-                    "mapped_collections"
-                }
-                if field in visible_fields:
-                    explained = False
-
-            if not explained:
-                still_unexplained.append(item)
-
-        if still_unexplained:
-            unexplained[field] = still_unexplained
-
-    return unexplained
-
-
-def format_unexplained_baseline_report(original_report, unexplained):
-    lines = [
-        "TARGET_FILE_BASELINE_DIFF:",
-        "preservation_ok: False",
-        "unexplained_missing_from_after:"
-    ]
-
-    for field, items in unexplained.items():
-        lines.append(f"- {field}: {items}")
-
-    lines.append("")
-    lines.append("Original baseline report:")
-    lines.append(original_report or "No baseline report available.")
-
-    return "\n".join(lines)
-
 
 
 async def repair_full_candidate_baseline_preservation(filename, task_goal, original_content, candidate_content, baseline_report, expected_after=""):

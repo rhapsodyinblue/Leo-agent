@@ -5409,7 +5409,7 @@ Run:
             return
 
         queue_prompt = f"""
-You are decomposing an approved CREATE project plan into small implementation tasks.
+You are decomposing an approved CREATE project plan into lightweight dependency-aware task skeletons.
 
 Project: {project_slug}
 Approved plan file: {plan_rel_path}
@@ -5424,21 +5424,21 @@ Current CREATE build state:
 {build_state or "No approved build state recorded yet."}
 ---
 
-Create a bounded executable build queue and a deferred backlog.
+Create a lightweight build queue and a deferred backlog.
 
 Your job:
 - Select the next useful build area from the approved plan.
-- Break that area down recursively until each executable task is small enough for the task runner to implement directly.
-- Create up to 50 executable tasks.
+- Break that area down into small ordered implementation slices.
+- Create up to 25 executable task skeletons.
 - Put larger areas/slices that should be decomposed later into backlog_items.
 
 Return ONLY valid JSON in this format:
 {{
   "executable_tasks": [
     {{
-      "task": "short executable task",
-      "target_file": "src/path/File.js",
-      "acceptance_criteria": "specific acceptance criteria",
+      "title": "short ordered implementation slice title",
+      "summary": "one or two sentences describing the slice",
+      "target_hint": "src/path/File.js",
       "depends_on": [],
       "prerequisites": [
         {{
@@ -5446,11 +5446,15 @@ Return ONLY valid JSON in this format:
           "must_contain": ["requiredStringOne", "requiredStringTwo"],
           "reason": "why these strings must exist before this task can safely run"
         }}
-      ],
-      "why_now": "why this task should happen at this point in the sequence"
+      ]
     }}
   ],
-  "backlog_items": ["larger slice to decompose later"]
+  "backlog_items": [
+    {{
+      "title": "larger deferred slice",
+      "reason": "why this slice should be deferred or decomposed later"
+    }}
+  ]
 }}
 
 Rules:
@@ -5460,20 +5464,19 @@ Rules:
 - Use prerequisites to declare simple mechanical file/string checks that must pass before this task can safely run.
 - prerequisites must be broad software-development checks, not app-specific guesses.
 - Only include prerequisites when a later task genuinely depends on earlier file contents.
-- Use why_now to explain the sequencing reason.
 - Decompose by behavior, not by broad feature name.
-- One executable task should change one behavior in one target file when possible.
-- Each task should be small enough that a coding model can implement it directly.
-- Each task must include a target file path when possible.
-- Each task must describe the concrete behavior to add or change.
-- Each task must include minimum acceptance criteria.
+- One executable task should describe one small implementation slice when possible.
+- Each task should be lightweight planning data, not a runner-ready implementation brief.
+- Include a target_hint when a likely file is known.
+- summary should stay short and concrete.
 - Avoid placeholder-friendly tasks like "create component" or "implement feature."
-- Prefer tasks like "add localStorage fallback to Dashboard.js" or "add controlled inputs for dashboard metrics."
+- Prefer concrete slice titles like "add localStorage fallback" or "wire controlled inputs".
 - Use the approved plan as scope control.
-- Prefer implementation tasks over planning tasks.
+- Prefer implementation slices over planning tasks.
 - Do not include testing-only tasks yet.
 - Do not include future expansion work.
-- Keep each task goal short, concrete, and executable.
+- Do not produce detailed acceptance criteria.
+- Do not produce runner-ready implementation prompts.
 - Avoid giant tasks that combine data model, UI, persistence, validation, and styling all at once.
 - Return ONLY the JSON object. No markdown.
 """
@@ -5527,37 +5530,50 @@ Raw output:
                     for item in backlog_items:
                         if isinstance(item, str) and item.strip():
                             f.write(f"- {item.strip()}\n")
+                        elif isinstance(item, dict):
+                            title = (item.get("title") or item.get("task") or item.get("goal") or "").strip()
+                            reason = (item.get("reason") or item.get("why_later") or "").strip()
+                            if title:
+                                f.write(f"- {title}\n")
+                                if reason:
+                                    f.write(f"  - Reason: {reason}\n")
 
             queue_batch_id = str(uuid.uuid4())[:8]
             created = []
             created_entries = []
-            for queue_order, item in enumerate(tasks_list[:50], start=1):
+            for queue_order, item in enumerate(tasks_list[:25], start=1):
                 task_goal = ""
-                file_path = ""
                 task_title = ""
+                task_summary = ""
+                target_hint = ""
                 depends_on_titles = []
                 prerequisites = []
 
                 if isinstance(item, str):
-                    task_goal = item.strip()
-                    task_title = task_goal
+                    task_title = item.strip()
 
                 elif isinstance(item, dict):
-                    title = (item.get("task") or item.get("goal") or item.get("title") or "").strip()
-                    file_path = (item.get("target_file") or item.get("file_path") or item.get("file") or "").strip()
-                    acceptance = (item.get("acceptance_criteria") or item.get("acceptance") or "").strip()
+                    task_title = (item.get("title") or item.get("task") or item.get("goal") or "").strip()
+                    task_summary = (
+                        item.get("summary")
+                        or item.get("description")
+                        or item.get("acceptance_criteria")
+                        or item.get("acceptance")
+                        or item.get("why_now")
+                        or item.get("sequence_reason")
+                        or ""
+                    ).strip()
+                    target_hint = (item.get("target_hint") or item.get("target_file") or item.get("file_path") or item.get("file") or "").strip()
                     depends_on_titles = normalize_task_dependency_titles(item.get("depends_on"))
                     prerequisites = normalize_task_prerequisites(item.get("prerequisites"))
-                    why_now = (item.get("why_now") or item.get("sequence_reason") or "").strip()
-                    task_title = title
 
                     parts = []
-                    if title:
-                        parts.append(title)
-                    if file_path:
-                        parts.append(f"Target file: {file_path}")
-                    if acceptance:
-                        parts.append(f"Acceptance criteria: {acceptance}")
+                    if task_title:
+                        parts.append(task_title)
+                    if task_summary:
+                        parts.append(f"Summary: {task_summary}")
+                    if target_hint:
+                        parts.append(f"Target hint: {target_hint}")
                     if depends_on_titles:
                         parts.append("Depends on: " + "; ".join(depends_on_titles))
                     if prerequisites:
@@ -5565,15 +5581,15 @@ Raw output:
                         for prereq in prerequisites:
                             prereq_bits.append(f"{prereq.get('file')}: " + ", ".join(prereq.get("must_contain", [])))
                         parts.append("Prerequisites: " + "; ".join(prereq_bits))
-                    if why_now:
-                        parts.append(f"Why now: {why_now}")
-
                     task_goal = "\n".join(parts).strip()
+
+                if not task_goal and task_title:
+                    task_goal = task_title
 
                 if not task_goal:
                     continue
 
-                target_file = file_path or extract_task_target_file(task_goal)
+                target_file = target_hint or extract_task_target_file(task_goal)
                 task = create_task(
                     task_goal,
                     assigned_role="leader",
@@ -5591,6 +5607,7 @@ Raw output:
                         "queue_batch_id": queue_batch_id,
                         "queue_order": queue_order,
                         "read_before_modify": plan_rel_path,
+                        "target_hint": target_hint,
                         "target_file": target_file,
                         "tool_limits": {
                             "file_reads": "unlimited",
@@ -5603,9 +5620,8 @@ Raw output:
                 created.append(task)
                 created_entries.append({
                     "task": task,
-                    "title": task_title,
-                    "depends_on_titles": depends_on_titles,
-                    "queue_order": queue_order
+                    "title": task_title or task_goal,
+                    "depends_on_titles": depends_on_titles
                 })
 
             for idx, entry in enumerate(created_entries):

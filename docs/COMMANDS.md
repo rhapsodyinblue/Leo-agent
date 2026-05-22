@@ -181,6 +181,7 @@ Known command forms:
 - `/create continue`
 - `/create read`
 - `/create compile-task <source_task_id>`
+- `/create reset-blocked`
 
 Purpose:
 
@@ -207,6 +208,7 @@ Safety notes:
 - Build queue generation depends on an approved plan and current build-state freshness.
 - `/create build-task` is marked as replaced by the build-queue / compile-task / task-run flow.
 - Compiled CREATE tasks are designed to become bounded one-file BUILD tasks.
+- `/create reset-blocked` only rechecks active-project tasks already in `blocked_prerequisite`; passing tasks are reset to `pending` and are not executed.
 
 ## `/review`
 

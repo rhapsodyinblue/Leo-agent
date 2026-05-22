@@ -69,6 +69,11 @@ Likely high-level flow:
 ### `/task run latest`
 - Resolves to the most recently created task id stored in session state
 
+### `/create reset-blocked`
+- Rechecks `blocked_prerequisite` tasks for the active CREATE project
+- Resets only passing active-project tasks to `pending`
+- Leaves still-failing tasks, other CREATE projects, and non-CREATE tasks unchanged
+
 ## Task State Relationships
 
 | State | Role | Notes |
@@ -87,6 +92,7 @@ Likely high-level flow:
 - `create_task(...)` writes new tasks with status `pending`.
 - `/task run next` appears to scan the queue in order and pick the first runnable `pending` task.
 - If prerequisites fail, the task is moved to `blocked_prerequisite` and the runner keeps scanning for another runnable task.
+- `/create reset-blocked` can move active-project tasks from `blocked_prerequisite` back to `pending` after prerequisites pass; it does not run or compile the task.
 
 ### Model execution
 - `run_task(...)` builds task-specific prompt context from:

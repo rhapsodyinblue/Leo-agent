@@ -623,6 +623,38 @@ def get_next_runnable_task_for_project_with_dependency_check(project_slug):
 
     return None, blocked_prerequisites, blocked_dependencies
 
+
+def reset_blocked_create_tasks(project_slug):
+    data = load_tasks()
+    reset_tasks = []
+    still_blocked = []
+
+    for task in data.get("tasks", []):
+        inputs = task.get("inputs") or {}
+        if inputs.get("approved_create_project") != project_slug:
+            continue
+        if task.get("status") != "blocked_prerequisite":
+            continue
+
+        prereq_result = check_task_prerequisites(task)
+        if prereq_result.get("ok"):
+            updated = update_task(task.get("task_id"), {
+                "status": "pending",
+                "result": None,
+                "next_action": None,
+                "needs_user": False
+            })
+            reset_tasks.append(updated or task)
+            continue
+
+        still_blocked.append({
+            "task": task,
+            "failures": prereq_result.get("failures", [])
+        })
+
+    return reset_tasks, still_blocked
+
+
 def evaluate_task_dependency_health(task, task_by_id):
     inputs = task.get("inputs") or {}
     depends_on_titles = normalize_task_dependency_titles(inputs.get("depends_on_titles") or inputs.get("depends_on"))
@@ -4777,6 +4809,46 @@ Appended evidence:
         )
 
         await cl.Message(content="\n\n".join(out)).send()
+        return
+
+    if user_text == "/create reset-blocked":
+        project_slug = cl.user_session.get("active_create_project")
+
+        if not project_slug:
+            await cl.Message(content="No active CREATE project. Use `/create use <project_slug>` first.").send()
+            return
+
+        reset_tasks, still_blocked = reset_blocked_create_tasks(project_slug)
+
+        if not reset_tasks and not still_blocked:
+            await cl.Message(content=f"No blocked prerequisite tasks found for active CREATE project `{project_slug}`.").send()
+            return
+
+        sections = [f"## CREATE Reset Blocked — `{project_slug}`"]
+
+        if reset_tasks:
+            lines = []
+            for task in reset_tasks:
+                goal_preview = " ".join(str(task.get("goal") or "").split())[:140]
+                lines.append(f"- `{task.get('task_id')}` reset to `pending` — {goal_preview}")
+            sections.append("Reset to pending:\n" + "\n".join(lines))
+
+        if still_blocked:
+            lines = []
+            for item in still_blocked:
+                task = item.get("task") or {}
+                failures = item.get("failures") or []
+                reason_bits = []
+                for failure in failures:
+                    file_name = failure.get("file") or "unknown file"
+                    reason = failure.get("reason") or "failed_prerequisite"
+                    missing = failure.get("missing") or []
+                    missing_text = f"; missing: {', '.join(str(x) for x in missing)}" if missing else ""
+                    reason_bits.append(f"{file_name} ({reason}{missing_text})")
+                lines.append(f"- `{task.get('task_id')}` still blocked — " + "; ".join(reason_bits))
+            sections.append("Still blocked:\n" + "\n".join(lines))
+
+        await cl.Message(content="\n\n".join(sections)).send()
         return
 
 

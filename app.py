@@ -555,6 +555,134 @@ def get_next_runnable_task_for_project_with_prereq_check(project_slug):
 
     return None, blocked
 
+
+def get_compiled_descendants(source_task_id, tasks):
+    descendants = []
+    for task in tasks:
+        inputs = task.get("inputs") or {}
+        if inputs.get("source_task_id") == source_task_id or inputs.get("compiled_from_task_id") == source_task_id:
+            descendants.append(task)
+    return descendants
+
+
+def latest_non_superseded_compiled_descendant(source_task, task_by_id):
+    source_inputs = source_task.get("inputs") or {}
+    compiled_ids = [str(x).strip() for x in (source_inputs.get("compiled_task_ids") or []) if str(x).strip()]
+    latest_id = str(source_inputs.get("latest_compiled_task_id") or "").strip()
+    ordered_ids = []
+
+    if latest_id:
+        ordered_ids.append(latest_id)
+    for task_id in reversed(compiled_ids):
+        if task_id not in ordered_ids:
+            ordered_ids.append(task_id)
+
+    for task_id in ordered_ids:
+        task = task_by_id.get(task_id)
+        if task and task.get("status") != "superseded":
+            return task
+
+    return None
+
+
+def latest_runnable_compiled_descendant(source_task, task_by_id):
+    task = latest_non_superseded_compiled_descendant(source_task, task_by_id)
+    if task and task.get("status") == "pending":
+        return task
+    return None
+
+
+def dependency_task_is_satisfied(dependency_task, task_by_id):
+    if dependency_task.get("status") == "done":
+        return True, None
+
+    if dependency_task.get("status") == "compiled":
+        latest_compiled = latest_non_superseded_compiled_descendant(dependency_task, task_by_id)
+        if latest_compiled and latest_compiled.get("status") == "done":
+            return True, latest_compiled
+        return False, latest_compiled
+
+    return False, None
+
+
+def supersede_prior_compiled_descendants(source_task_id, latest_task_id):
+    data = load_tasks()
+    superseded = []
+
+    for task in get_compiled_descendants(source_task_id, data.get("tasks", [])):
+        if task.get("task_id") == latest_task_id:
+            continue
+        if task.get("status") not in ("pending", "blocked_prerequisite"):
+            continue
+
+        updated = update_task(task.get("task_id"), {
+            "status": "superseded",
+            "result": f"Superseded by compiled task `{latest_task_id}`.",
+            "next_action": f"Use latest compiled task `{latest_task_id}`.",
+            "needs_user": False
+        })
+        superseded.append(updated or task)
+
+    return superseded
+
+
+def lifecycle_run_refusal(task, task_by_id):
+    status = task.get("status")
+    if status not in ("compiled", "superseded"):
+        return None
+
+    latest_runnable = None
+    if status == "compiled":
+        latest_runnable = latest_runnable_compiled_descendant(task, task_by_id)
+    elif status == "superseded":
+        inputs = task.get("inputs") or {}
+        source_id = inputs.get("source_task_id") or inputs.get("compiled_from_task_id")
+        source_task = task_by_id.get(source_id)
+        if source_task:
+            latest_runnable = latest_runnable_compiled_descendant(source_task, task_by_id)
+
+    latest_line = ""
+    if latest_runnable:
+        latest_line = f"\nLatest runnable compiled task: `{latest_runnable.get('task_id')}`\nRun: `/task run {latest_runnable.get('task_id')}`"
+
+    if status == "compiled":
+        return f"Task `{task.get('task_id')}` is a compiled CREATE source task and is no longer directly runnable.{latest_line}"
+
+    return f"Task `{task.get('task_id')}` has been superseded by a newer compiled task and is no longer runnable.{latest_line}"
+
+
+def validate_create_compile_source(task, project_slug):
+    inputs = task.get("inputs") or {}
+    task_project = inputs.get("approved_create_project")
+
+    if task_project != project_slug:
+        return False, (
+            f"Cannot compile task `{task.get('task_id')}` for active CREATE project `{project_slug}`. "
+            f"Source task belongs to `{task_project or 'none'}`."
+        )
+
+    if inputs.get("source_task_id") or inputs.get("compiled_from_task_id"):
+        return False, (
+            f"Cannot compile task `{task.get('task_id')}` because it is already a compiled child. "
+            "Only original CREATE source tasks can be compiled."
+        )
+
+    status = task.get("status")
+    if status not in ("pending", "blocked_prerequisite"):
+        return False, (
+            f"Cannot compile task `{task.get('task_id')}` with status `{status}`. "
+            "Only `pending` or `blocked_prerequisite` source tasks can be compiled."
+        )
+
+    if task.get("needs_user"):
+        return False, (
+            f"Cannot compile task `{task.get('task_id')}` while it needs user input. "
+            "Resolve the user-needed state before compiling."
+        )
+
+    return True, ""
+
+
 def check_task_dependencies(task, task_by_id):
     inputs = task.get("inputs") or {}
     dependency_ids = [str(x).strip() for x in (inputs.get("depends_on_task_ids") or []) if str(x).strip()]
@@ -579,10 +707,15 @@ def check_task_dependencies(task, task_by_id):
             })
             continue
 
-        if dependency_task.get("status") != "done":
+        satisfied, latest_compiled = dependency_task_is_satisfied(dependency_task, task_by_id)
+        if not satisfied:
+            latest_status = latest_compiled.get("status") if latest_compiled else None
+            reason = f"dependency_not_done:{dependency_task.get('status')}"
+            if dependency_task.get("status") == "compiled":
+                reason = f"compiled_dependency_not_done:{latest_status or 'no_active_compiled_task'}"
             failures.append({
                 "task_id": dep_id,
-                "reason": f"dependency_not_done:{dependency_task.get('status')}"
+                "reason": reason
             })
 
     return {"ok": not failures, "failures": failures, "checked": checked}
@@ -670,7 +803,8 @@ def evaluate_task_dependency_health(task, task_by_id):
         dependency_task = task_by_id.get(dep_id)
         if not dependency_task:
             return "STALE_ID"
-        if dependency_task.get("status") != "done":
+        satisfied, _latest_compiled = dependency_task_is_satisfied(dependency_task, task_by_id)
+        if not satisfied:
             return "PENDING"
 
     return "OK"
@@ -6645,6 +6779,11 @@ Next Build Task:
             await cl.Message(content=f"No task found with ID `{source_task_id}`.").send()
             return
 
+        can_compile, compile_refusal = validate_create_compile_source(source_task, project_slug)
+        if not can_compile:
+            await cl.Message(content=compile_refusal).send()
+            return
+
         plan_path, plan_rel_path = create_project_path(project_slug, "PROJECT_PLAN.md")
 
         if not Path(plan_path).exists():
@@ -6904,12 +7043,45 @@ Execution requirement: before editing, the BUILD runner must produce an IMPLEMEN
 
             cl.user_session.set("last_created_task_id", compiled_task["task_id"])
 
+            superseded_tasks = supersede_prior_compiled_descendants(source_task_id, compiled_task["task_id"])
+            compiled_task_ids = [
+                str(x).strip()
+                for x in (source_inputs.get("compiled_task_ids") or [])
+                if str(x).strip()
+            ]
+            if compiled_task["task_id"] not in compiled_task_ids:
+                compiled_task_ids.append(compiled_task["task_id"])
+
+            compile_summary = (
+                f"Compiled into executable task `{compiled_task['task_id']}`."
+                f"\nTarget file: `{target_file or 'Not detected'}`."
+            )
+            if superseded_tasks:
+                compile_summary += (
+                    "\nSuperseded older compiled task(s): "
+                    + ", ".join(f"`{task.get('task_id')}`" for task in superseded_tasks)
+                    + "."
+                )
+
+            update_task(source_task_id, {
+                "status": "compiled",
+                "inputs": {
+                    **source_inputs,
+                    "latest_compiled_task_id": compiled_task["task_id"],
+                    "compiled_task_ids": compiled_task_ids
+                },
+                "result": compile_summary,
+                "next_action": f"Run latest compiled task `{compiled_task['task_id']}` with `/task run {compiled_task['task_id']}`.",
+                "needs_user": False
+            })
+
             await cl.Message(content=f"""✅ CREATE task compiled.
 
 Project: `{project_slug}`
 Source task: `{source_task_id}`
 Compiled task ID: `{compiled_task['task_id']}`
 Target file: `{target_file or "Not detected"}`
+Superseded older compiled tasks: `{len(superseded_tasks)}`
 
 Compiled task:
 {compiled_task['goal']}
@@ -7812,6 +7984,17 @@ Running project-scoped task `{task['task_id']}` for active CREATE project `{proj
 
         if not task:
             await cl.Message(content=f"No task found with ID `{task_id}`.").send()
+            return
+
+        task_data = load_tasks()
+        task_by_id = {
+            t.get("task_id"): t
+            for t in task_data.get("tasks", [])
+            if t.get("task_id")
+        }
+        refusal = lifecycle_run_refusal(task, task_by_id)
+        if refusal:
+            await cl.Message(content=refusal).send()
             return
 
         prereq_result = check_task_prerequisites(task)

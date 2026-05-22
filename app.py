@@ -555,7 +555,6 @@ def get_next_runnable_task_for_project_with_prereq_check(project_slug):
 
     return None, blocked
 
-
 def check_task_dependencies(task, task_by_id):
     inputs = task.get("inputs") or {}
     dependency_ids = [str(x).strip() for x in (inputs.get("depends_on_task_ids") or []) if str(x).strip()]
@@ -623,7 +622,6 @@ def get_next_runnable_task_for_project_with_dependency_check(project_slug):
         blocked_prerequisites.append(blocked_task or task)
 
     return None, blocked_prerequisites, blocked_dependencies
-
 
 def evaluate_task_dependency_health(task, task_by_id):
     inputs = task.get("inputs") or {}
@@ -4683,6 +4681,104 @@ Appended evidence:
 
         await cl.Message(content=f"Active CREATE project set to `{project_slug}`.\nPlan file: `{rel_path}`").send()
         return
+
+    if user_text == "/create dependency-status":
+        project_slug = cl.user_session.get("active_create_project")
+
+        if not project_slug:
+            await cl.Message(content="No active CREATE project. Use `/create use <project_slug>` first.").send()
+            return
+
+        all_tasks = load_tasks().get("tasks", [])
+        project_tasks = []
+        task_by_id = {}
+
+        for task in all_tasks:
+            task_by_id[task.get("task_id")] = task
+            task_inputs = task.get("inputs") or {}
+            if task_inputs.get("approved_create_project") == project_slug:
+                project_tasks.append(task)
+
+        if not project_tasks:
+            await cl.Message(content=f"No CREATE tasks found for active project `{project_slug}`.").send()
+            return
+
+        def sort_key(task):
+            inputs = task.get("inputs") or {}
+            queue_order = inputs.get("queue_order")
+            try:
+                normalized_order = int(queue_order)
+            except Exception:
+                normalized_order = 10**9
+            return (
+                str(inputs.get("queue_batch_id") or "~"),
+                normalized_order,
+                task.get("created_at") or "",
+                task.get("task_id") or ""
+            )
+
+        project_tasks = sorted(project_tasks, key=sort_key)
+
+        summary_counts = {
+            "total": len(project_tasks),
+            "tasks_with_dependencies": 0,
+            "OK": 0,
+            "PENDING": 0,
+            "MISSING_ID": 0,
+            "STALE_ID": 0,
+            "NO_DEPS": 0
+        }
+
+        grouped = {}
+        for task in project_tasks:
+            inputs = task.get("inputs") or {}
+            batch_id = inputs.get("queue_batch_id") or "unbatched"
+            grouped.setdefault(batch_id, []).append(task)
+
+        out = [f"## CREATE Dependency Status — `{project_slug}`"]
+
+        for batch_id, batch_tasks in grouped.items():
+            out.append(f"### Batch `{batch_id}`")
+
+            for task in batch_tasks:
+                inputs = task.get("inputs") or {}
+                depends_on_titles = normalize_task_dependency_titles(inputs.get("depends_on_titles") or inputs.get("depends_on"))
+                depends_on_task_ids = [str(x).strip() for x in (inputs.get("depends_on_task_ids") or []) if str(x).strip()]
+                health = evaluate_task_dependency_health(task, task_by_id)
+
+                if depends_on_titles or depends_on_task_ids:
+                    summary_counts["tasks_with_dependencies"] += 1
+                summary_counts[health] += 1
+
+                goal_preview = " ".join(str(task.get("goal") or "").split())[:140]
+                queue_order = inputs.get("queue_order")
+                title_text = ", ".join(depends_on_titles) if depends_on_titles else "none"
+                ids_text = ", ".join(depends_on_task_ids) if depends_on_task_ids else "none"
+
+                out.append(
+                    f"`{task.get('task_id')}` — **{task.get('status')}** — {health}\n"
+                    f"Order: {queue_order if queue_order is not None else 'n/a'}\n"
+                    f"Goal: {goal_preview}\n"
+                    f"Depends on titles: {title_text}\n"
+                    f"Depends on ids: {ids_text}"
+                )
+
+        out.insert(
+            1,
+            "\n".join([
+                f"Total project tasks: {summary_counts['total']}",
+                f"Tasks with dependencies: {summary_counts['tasks_with_dependencies']}",
+                f"OK: {summary_counts['OK']}",
+                f"PENDING: {summary_counts['PENDING']}",
+                f"MISSING_ID: {summary_counts['MISSING_ID']}",
+                f"STALE_ID: {summary_counts['STALE_ID']}",
+                f"NO_DEPS: {summary_counts['NO_DEPS']}"
+            ])
+        )
+
+        await cl.Message(content="\n\n".join(out)).send()
+        return
+
 
     if user_text == "/create dependency-status":
         project_slug = cl.user_session.get("active_create_project")

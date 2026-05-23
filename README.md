@@ -1,8 +1,15 @@
 # Leo Agent
 
-Leo is a local multi-agent AI system for planning, building, documenting, testing, and maintaining local projects. It runs through a Chainlit chat interface, uses Ollama-hosted local models, and keeps project state in local files.
+Leo is an experimental local multi-agent AI system focused on orchestration, workflow automation, and long-term AI collaboration.
+The project explores how apable smaller models can be coordinated effectively through architecture, memory systems, and structured workflows rather than relying solely on larger models.
+## Design Philosophy
 
-## Current Architecture
+Leo is built around a few core ideas:
+- Coordination and orchestration matter as much as raw model capability.
+- AI systems should augment human thinking and execution rather than replace human involvement entirely.
+- Long-running workflows need memory, iteration, structured context, and clear operating rules.
+- The architecture around the AI is often where the real leverage comes from.
+## System Architecture
 
 The current implementation is centered on `app.py`, a Chainlit application that combines the chat UI, command routing, task queue, file operation staging, memory handling, CREATE project planning flow, build-task execution, and validation helpers.
 
@@ -27,7 +34,7 @@ chainlit run app.py
 - Chainlit
 - Ollama
 
-## Required Ollama Models Mentioned In The Repo
+## Referenced Ollama Models Mentioned In The Repo
 
 - `leo-build`
 - `qwen2.5-coder:14b`

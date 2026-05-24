@@ -74,6 +74,12 @@ Likely high-level flow:
 - Resets only passing active-project tasks to `pending`
 - Leaves still-failing tasks, other CREATE projects, and non-CREATE tasks unchanged
 
+### CREATE compiled task lifecycle
+- `/create compile-task <source_task_id>` creates a runnable compiled child task and marks the source task `compiled`
+- Recompiling the same source marks older pending or prerequisite-blocked compiled children `superseded`
+- `compiled` source tasks and `superseded` children are not directly runnable
+- Dependencies that target a `compiled` source task are satisfied only when its latest non-superseded compiled child is `done`
+
 ## Task State Relationships
 
 | State | Role | Notes |
@@ -93,6 +99,8 @@ Likely high-level flow:
 - `/task run next` appears to scan the queue in order and pick the first runnable `pending` task.
 - If prerequisites fail, the task is moved to `blocked_prerequisite` and the runner keeps scanning for another runnable task.
 - `/create reset-blocked` can move active-project tasks from `blocked_prerequisite` back to `pending` after prerequisites pass; it does not run or compile the task.
+- CREATE source tasks move to `compiled` after `/create compile-task`; the compiled child remains the runnable `pending` task.
+- Recompiled pending or prerequisite-blocked children move to `superseded` so duplicate compiled descendants do not remain runnable.
 
 ### Model execution
 - `run_task(...)` builds task-specific prompt context from:

@@ -88,6 +88,9 @@ Likely high-level flow:
 - Resolves or confirms a target file
 - Pulls in build-state context and target-file preservation anchors
 - Strongly constrains output to one implementation slice
+- Marks the source queue task `compiled` after the compiled child is created
+- Marks older pending or prerequisite-blocked compiled children `superseded` when the source is recompiled
+- Leaves the latest compiled child as the runnable execution target
 
 ### `/create document-state`
 - Rebuilds `PROJECT_BUILD_STATE.md`

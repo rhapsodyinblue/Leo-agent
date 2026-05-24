@@ -420,6 +420,60 @@ def canonicalize_dependency_title(title):
     return " ".join(str(title or "").strip().lower().split())
 
 
+def task_dependency_title(task):
+    inputs = task.get("inputs") or {}
+    title = inputs.get("title") or inputs.get("queue_task_title") or inputs.get("original_queue_task") or task.get("goal")
+    lines = str(title or "").strip().splitlines()
+    return lines[0].strip() if lines else ""
+
+
+def find_project_dependency_title_matches(project_tasks, dependency_title):
+    wanted_title = canonicalize_dependency_title(dependency_title)
+    if not wanted_title:
+        return []
+
+    matches = []
+    for task in project_tasks:
+        task_title = task_dependency_title(task)
+        if canonicalize_dependency_title(task_title) == wanted_title and task.get("task_id"):
+            matches.append(task)
+    return matches
+
+
+def resolve_dependency_id_for_title(project_tasks, dependency_title):
+    matches = find_project_dependency_title_matches(project_tasks, dependency_title)
+    if len(matches) == 1:
+        return matches[0].get("task_id")
+    return None
+
+
+def unresolved_dependency_titles_after_clears(dependency_titles, active_dependency_ids, task_by_id):
+    remaining_titles = [
+        {
+            "title": title,
+            "key": canonicalize_dependency_title(title)
+        }
+        for title in dependency_titles
+        if canonicalize_dependency_title(title)
+    ]
+
+    for dep_id in active_dependency_ids:
+        dependency_task = task_by_id.get(dep_id)
+        if not dependency_task:
+            continue
+
+        dependency_title_key = canonicalize_dependency_title(task_dependency_title(dependency_task))
+        if not dependency_title_key:
+            continue
+
+        for idx, item in enumerate(remaining_titles):
+            if item["key"] == dependency_title_key:
+                remaining_titles.pop(idx)
+                break
+
+    return [item["title"] for item in remaining_titles]
+
+
 def resolve_task_file_path(task, file_name):
     file_name = (file_name or "").strip()
 
@@ -685,15 +739,84 @@ def validate_create_compile_source(task, project_slug):
 
 def check_task_dependencies(task, task_by_id):
     inputs = task.get("inputs") or {}
+    dependency_titles = normalize_task_dependency_titles(inputs.get("depends_on_titles") or inputs.get("depends_on"))
     dependency_ids = [str(x).strip() for x in (inputs.get("depends_on_task_ids") or []) if str(x).strip()]
+    cleared_dependency_ids = [str(x).strip() for x in (inputs.get("cleared_dependency_ids") or []) if str(x).strip()]
+    cleared_dependency_titles = [
+        canonicalize_dependency_title(x)
+        for x in (inputs.get("cleared_dependency_titles") or [])
+        if canonicalize_dependency_title(x)
+    ]
+    active_dependency_titles = [
+        title for title in dependency_titles
+        if canonicalize_dependency_title(title) not in cleared_dependency_titles
+    ]
+    active_dependency_ids = [
+        dep_id for dep_id in dependency_ids
+        if dep_id not in cleared_dependency_ids
+    ]
+    dependency_override = bool(inputs.get("dependency_override"))
+
+    if dependency_override:
+        checked = []
+        for dep_id in dependency_ids:
+            dependency_task = task_by_id.get(dep_id)
+            checked.append({
+                "task_id": dep_id,
+                "status": dependency_task.get("status") if dependency_task else None
+            })
+        return {
+            "ok": True,
+            "failures": [],
+            "checked": checked,
+            "dependency_override": True,
+            "cleared_dependency_ids": cleared_dependency_ids,
+            "cleared_dependency_titles": cleared_dependency_titles,
+            "ignored_dependency_ids": dependency_ids
+        }
+
+    unresolved_titles = unresolved_dependency_titles_after_clears(
+        active_dependency_titles,
+        active_dependency_ids,
+        task_by_id
+    )
+    if unresolved_titles:
+        return {
+            "ok": False,
+            "failures": [
+                {
+                    "title": title,
+                    "reason": "unresolved_dependency_title"
+                }
+                for title in unresolved_titles
+            ],
+            "checked": [],
+            "dependency_override": False,
+            "cleared_dependency_ids": cleared_dependency_ids,
+            "cleared_dependency_titles": cleared_dependency_titles,
+            "ignored_dependency_ids": []
+        }
 
     if not dependency_ids:
-        return {"ok": True, "failures": [], "checked": []}
+        return {
+            "ok": True,
+            "failures": [],
+            "checked": [],
+            "dependency_override": False,
+            "cleared_dependency_ids": cleared_dependency_ids,
+            "cleared_dependency_titles": cleared_dependency_titles,
+            "ignored_dependency_ids": []
+        }
 
     failures = []
     checked = []
+    ignored_dependency_ids = []
 
     for dep_id in dependency_ids:
+        if dep_id in cleared_dependency_ids:
+            ignored_dependency_ids.append(dep_id)
+            continue
+
         dependency_task = task_by_id.get(dep_id)
         checked.append({
             "task_id": dep_id,
@@ -718,7 +841,15 @@ def check_task_dependencies(task, task_by_id):
                 "reason": reason
             })
 
-    return {"ok": not failures, "failures": failures, "checked": checked}
+    return {
+        "ok": not failures,
+        "failures": failures,
+        "checked": checked,
+        "dependency_override": False,
+        "cleared_dependency_ids": cleared_dependency_ids,
+        "cleared_dependency_titles": cleared_dependency_titles,
+        "ignored_dependency_ids": ignored_dependency_ids
+    }
 
 
 def get_next_runnable_task_for_project_with_dependency_check(project_slug):
@@ -749,12 +880,12 @@ def get_next_runnable_task_for_project_with_dependency_check(project_slug):
 
         prereq_result = check_task_prerequisites(task)
         if prereq_result.get("ok"):
-            return task, blocked_prerequisites, blocked_dependencies
+            return task, blocked_prerequisites, blocked_dependencies, dependency_result
 
         blocked_task = block_task_for_failed_prerequisites(task, prereq_result)
         blocked_prerequisites.append(blocked_task or task)
 
-    return None, blocked_prerequisites, blocked_dependencies
+    return None, blocked_prerequisites, blocked_dependencies, None
 
 
 def reset_blocked_create_tasks(project_slug):
@@ -792,14 +923,41 @@ def evaluate_task_dependency_health(task, task_by_id):
     inputs = task.get("inputs") or {}
     depends_on_titles = normalize_task_dependency_titles(inputs.get("depends_on_titles") or inputs.get("depends_on"))
     depends_on_task_ids = [str(x).strip() for x in (inputs.get("depends_on_task_ids") or []) if str(x).strip()]
+    dependency_override = bool(inputs.get("dependency_override"))
+    cleared_dependency_ids = [str(x).strip() for x in (inputs.get("cleared_dependency_ids") or []) if str(x).strip()]
+    cleared_dependency_titles = [str(x).strip() for x in (inputs.get("cleared_dependency_titles") or []) if str(x).strip()]
+    cleared_dependency_title_keys = [
+        canonicalize_dependency_title(title)
+        for title in cleared_dependency_titles
+        if canonicalize_dependency_title(title)
+    ]
+    active_depends_on_titles = [
+        title for title in depends_on_titles
+        if canonicalize_dependency_title(title) not in cleared_dependency_title_keys
+    ]
+    active_depends_on_task_ids = [
+        dep_id for dep_id in depends_on_task_ids
+        if dep_id not in cleared_dependency_ids
+    ]
+
+    if dependency_override:
+        return "OK"
 
     if not depends_on_titles and not depends_on_task_ids:
         return "NO_DEPS"
 
-    if depends_on_titles and len(depends_on_task_ids) < len(depends_on_titles):
+    unresolved_titles = unresolved_dependency_titles_after_clears(
+        active_depends_on_titles,
+        active_depends_on_task_ids,
+        task_by_id
+    )
+    if unresolved_titles:
         return "MISSING_ID"
 
     for dep_id in depends_on_task_ids:
+        if dep_id in cleared_dependency_ids:
+            continue
+
         dependency_task = task_by_id.get(dep_id)
         if not dependency_task:
             return "STALE_ID"
@@ -4911,6 +5069,11 @@ Appended evidence:
                 depends_on_titles = normalize_task_dependency_titles(inputs.get("depends_on_titles") or inputs.get("depends_on"))
                 depends_on_task_ids = [str(x).strip() for x in (inputs.get("depends_on_task_ids") or []) if str(x).strip()]
                 health = evaluate_task_dependency_health(task, task_by_id)
+                dependency_result = check_task_dependencies(task, task_by_id)
+                override_active = dependency_result.get("dependency_override")
+                cleared_dependency_ids = dependency_result.get("cleared_dependency_ids") or []
+                cleared_dependency_titles = dependency_result.get("cleared_dependency_titles") or []
+                ignored_dependency_ids = dependency_result.get("ignored_dependency_ids") or []
 
                 if depends_on_titles or depends_on_task_ids:
                     summary_counts["tasks_with_dependencies"] += 1
@@ -4920,13 +5083,23 @@ Appended evidence:
                 queue_order = inputs.get("queue_order")
                 title_text = ", ".join(depends_on_titles) if depends_on_titles else "none"
                 ids_text = ", ".join(depends_on_task_ids) if depends_on_task_ids else "none"
+                status_notes = []
+                if override_active:
+                    status_notes.append("override active")
+                if cleared_dependency_ids:
+                    status_notes.append("cleared ids: " + ", ".join(cleared_dependency_ids))
+                if cleared_dependency_titles:
+                    status_notes.append("cleared titles: " + ", ".join(cleared_dependency_titles))
+                if ignored_dependency_ids:
+                    status_notes.append("ignored ids: " + ", ".join(ignored_dependency_ids))
+                note_text = "\nNotes: " + " | ".join(status_notes) if status_notes else ""
 
                 out.append(
                     f"`{task.get('task_id')}` — **{task.get('status')}** — {health}\n"
                     f"Order: {queue_order if queue_order is not None else 'n/a'}\n"
                     f"Goal: {goal_preview}\n"
                     f"Depends on titles: {title_text}\n"
-                    f"Depends on ids: {ids_text}"
+                    f"Depends on ids: {ids_text}{note_text}"
                 )
 
         out.insert(
@@ -4943,6 +5116,169 @@ Appended evidence:
         )
 
         await cl.Message(content="\n\n".join(out)).send()
+        return
+
+    if user_text.startswith("/create dependency-clear "):
+        project_slug = cl.user_session.get("active_create_project")
+
+        if not project_slug:
+            await cl.Message(content="No active CREATE project. Use `/create use <project_slug>` first.").send()
+            return
+
+        parts = user_text.split(" ", 3)
+        if len(parts) < 4:
+            await cl.Message(content="Use this format:\n\n/create dependency-clear <task_id> <dependency_id_or_title>").send()
+            return
+
+        task_id = parts[2].strip()
+        dependency_ref = parts[3].strip()
+
+        task = get_task(task_id)
+        if not task:
+            await cl.Message(content=f"No task found with ID `{task_id}`.").send()
+            return
+
+        task_inputs = task.get("inputs") or {}
+        if task_inputs.get("approved_create_project") != project_slug:
+            await cl.Message(content=f"Task `{task_id}` is not part of active CREATE project `{project_slug}`.").send()
+            return
+
+        all_tasks = load_tasks().get("tasks", [])
+        project_tasks = [
+            project_task for project_task in all_tasks
+            if (project_task.get("inputs") or {}).get("approved_create_project") == project_slug
+        ]
+        existing_dependency_ids = [str(x).strip() for x in (task_inputs.get("depends_on_task_ids") or []) if str(x).strip()]
+        existing_dependency_titles = normalize_task_dependency_titles(task_inputs.get("depends_on_titles") or task_inputs.get("depends_on"))
+        cleared_dependency_ids = [str(x).strip() for x in (task_inputs.get("cleared_dependency_ids") or []) if str(x).strip()]
+        cleared_dependency_titles = [str(x).strip() for x in (task_inputs.get("cleared_dependency_titles") or []) if str(x).strip()]
+        cleared_dependency_title_keys = [
+            canonicalize_dependency_title(title)
+            for title in cleared_dependency_titles
+            if canonicalize_dependency_title(title)
+        ]
+
+        matched_id = None
+        matched_title = None
+        title_resolution_note = ""
+
+        if dependency_ref in existing_dependency_ids:
+            matched_id = dependency_ref
+        else:
+            wanted_title = canonicalize_dependency_title(dependency_ref)
+            for title in existing_dependency_titles:
+                if canonicalize_dependency_title(title) == wanted_title:
+                    matched_title = title
+                    break
+            if matched_title:
+                title_matches = find_project_dependency_title_matches(project_tasks, matched_title)
+                title_resolved_id = resolve_dependency_id_for_title(project_tasks, matched_title)
+                if title_resolved_id and title_resolved_id in existing_dependency_ids:
+                    matched_id = title_resolved_id
+                elif title_resolved_id:
+                    title_resolution_note = (
+                        f"\nTitle `{matched_title}` resolved to `{title_resolved_id}`, "
+                        "but that ID is not declared on this task, so no ID clear was recorded."
+                    )
+                elif len(title_matches) > 1:
+                    title_resolution_note = (
+                        f"\nTitle `{matched_title}` matched {len(title_matches)} project tasks, "
+                        "so no ID clear was recorded."
+                    )
+                else:
+                    title_resolution_note = (
+                        f"\nTitle `{matched_title}` did not uniquely resolve to a project task ID, "
+                        "so only the title clear was recorded."
+                    )
+
+        if not matched_id and not matched_title:
+            await cl.Message(content=f"No matching dependency id or title found on task `{task_id}`.").send()
+            return
+
+        changed = False
+        if matched_id and matched_id not in cleared_dependency_ids:
+            cleared_dependency_ids.append(matched_id)
+            changed = True
+        if matched_title and canonicalize_dependency_title(matched_title) not in cleared_dependency_title_keys:
+            cleared_dependency_titles.append(canonicalize_dependency_title(matched_title))
+            changed = True
+
+        if not changed:
+            await cl.Message(content=f"No-op: dependency `{matched_id or matched_title or dependency_ref}` was already cleared for task `{task_id}`.").send()
+            return
+
+        updated = update_task(task_id, {
+            "inputs": {
+                **task_inputs,
+                "cleared_dependency_ids": cleared_dependency_ids,
+                "cleared_dependency_titles": cleared_dependency_titles
+            }
+        })
+
+        if not updated:
+            await cl.Message(content=f"Failed to update task `{task_id}`.").send()
+            return
+
+        detail = matched_id or matched_title or dependency_ref
+        enforcement_note = (
+            "Resolved dependency ID enforcement is cleared for this task."
+            if matched_id
+            else "Only title-based unresolved dependency checks are cleared for this task."
+        )
+        await cl.Message(content=f"""Dependency clear recorded.
+
+Project: `{project_slug}`
+Task: `{task_id}`
+Cleared dependency: `{detail}`{title_resolution_note}
+
+{enforcement_note}""").send()
+        return
+
+    if user_text.startswith("/create dependency-override "):
+        project_slug = cl.user_session.get("active_create_project")
+
+        if not project_slug:
+            await cl.Message(content="No active CREATE project. Use `/create use <project_slug>` first.").send()
+            return
+
+        task_id = user_text.replace("/create dependency-override ", "", 1).strip()
+        if not task_id:
+            await cl.Message(content="Use this format:\n\n/create dependency-override <task_id>").send()
+            return
+
+        task = get_task(task_id)
+        if not task:
+            await cl.Message(content=f"No task found with ID `{task_id}`.").send()
+            return
+
+        task_inputs = task.get("inputs") or {}
+        if task_inputs.get("approved_create_project") != project_slug:
+            await cl.Message(content=f"Task `{task_id}` is not part of active CREATE project `{project_slug}`.").send()
+            return
+
+        if task_inputs.get("dependency_override"):
+            await cl.Message(content=f"No-op: dependency override is already active for task `{task_id}`.").send()
+            return
+
+        updated = update_task(task_id, {
+            "inputs": {
+                **task_inputs,
+                "dependency_override": True,
+                "dependency_override_at": datetime.now().isoformat(timespec="seconds"),
+                "dependency_override_reason": "manual override"
+            }
+        })
+
+        if not updated:
+            await cl.Message(content=f"Failed to update task `{task_id}`.").send()
+            return
+
+        await cl.Message(content=f"""Dependency override activated.
+
+Project: `{project_slug}`
+Task: `{task_id}`
+
+This task will be treated as dependency-ready by project-scoped dependency checks.""").send()
         return
 
     if user_text == "/create reset-blocked":
@@ -5049,6 +5385,11 @@ Appended evidence:
                 depends_on_titles = normalize_task_dependency_titles(inputs.get("depends_on_titles") or inputs.get("depends_on"))
                 depends_on_task_ids = [str(x).strip() for x in (inputs.get("depends_on_task_ids") or []) if str(x).strip()]
                 health = evaluate_task_dependency_health(task, task_by_id)
+                dependency_result = check_task_dependencies(task, task_by_id)
+                override_active = dependency_result.get("dependency_override")
+                cleared_dependency_ids = dependency_result.get("cleared_dependency_ids") or []
+                cleared_dependency_titles = dependency_result.get("cleared_dependency_titles") or []
+                ignored_dependency_ids = dependency_result.get("ignored_dependency_ids") or []
 
                 if depends_on_titles or depends_on_task_ids:
                     summary_counts["tasks_with_dependencies"] += 1
@@ -5058,13 +5399,23 @@ Appended evidence:
                 queue_order = inputs.get("queue_order")
                 title_text = ", ".join(depends_on_titles) if depends_on_titles else "none"
                 ids_text = ", ".join(depends_on_task_ids) if depends_on_task_ids else "none"
+                status_notes = []
+                if override_active:
+                    status_notes.append("override active")
+                if cleared_dependency_ids:
+                    status_notes.append("cleared ids: " + ", ".join(cleared_dependency_ids))
+                if cleared_dependency_titles:
+                    status_notes.append("cleared titles: " + ", ".join(cleared_dependency_titles))
+                if ignored_dependency_ids:
+                    status_notes.append("ignored ids: " + ", ".join(ignored_dependency_ids))
+                note_text = "\nNotes: " + " | ".join(status_notes) if status_notes else ""
 
                 out.append(
                     f"`{task.get('task_id')}` — **{task.get('status')}** — {health}\n"
                     f"Order: {queue_order if queue_order is not None else 'n/a'}\n"
                     f"Goal: {goal_preview}\n"
                     f"Depends on titles: {title_text}\n"
-                    f"Depends on ids: {ids_text}"
+                    f"Depends on ids: {ids_text}{note_text}"
                 )
 
         out.insert(
@@ -7897,7 +8248,7 @@ To cancel, run:
             await cl.Message(content="No active CREATE project. Use `/create use <project_slug>` first.").send()
             return
 
-        task, blocked, dependency_blocked = get_next_runnable_task_for_project_with_dependency_check(project_slug)
+        task, blocked, dependency_blocked, selected_dependency_state = get_next_runnable_task_for_project_with_dependency_check(project_slug)
         if not task:
             if blocked or dependency_blocked:
                 sections = []
@@ -7934,6 +8285,10 @@ Next:
                 await cl.Message(content=f"No runnable pending tasks for active CREATE project `{project_slug}`.").send()
             return
 
+        selected_override_note = ""
+        if selected_dependency_state and selected_dependency_state.get("dependency_override"):
+            selected_override_note = " with dependency override active"
+
         if blocked or dependency_blocked:
             sections = []
 
@@ -7962,9 +8317,12 @@ Next:
 
             await cl.Message(content=f"""{chr(10).join(sections)}
 
-Running project-scoped task `{task['task_id']}` for active CREATE project `{project_slug}`...""").send()
+Running project-scoped task `{task['task_id']}` for active CREATE project `{project_slug}`{selected_override_note}...""").send()
         else:
-            await cl.Message(content=f"Running next pending task for active CREATE project `{project_slug}`: `{task['task_id']}`...").send()
+            if selected_dependency_state and selected_dependency_state.get("dependency_override"):
+                await cl.Message(content=f"Running next pending task for active CREATE project `{project_slug}` with dependency override active: `{task['task_id']}`...").send()
+            else:
+                await cl.Message(content=f"Running next pending task for active CREATE project `{project_slug}`: `{task['task_id']}`...").send()
 
         user_text = f"/task run {task['task_id']}"
 

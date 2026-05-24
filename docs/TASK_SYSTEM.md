@@ -74,6 +74,11 @@ Likely high-level flow:
 - Resets only passing active-project tasks to `pending`
 - Leaves still-failing tasks, other CREATE projects, and non-CREATE tasks unchanged
 
+### CREATE dependency escape hatches
+- `/create dependency-clear <task_id> <dependency_id_or_title>` clears one active-project dependency check by ID or by safely matched title
+- `/create dependency-override <task_id>` marks an active-project task dependency-ready without changing dependency IDs
+- Dependency clears and overrides affect dependency checks only; they do not run, compile, or reset tasks
+
 ### CREATE compiled task lifecycle
 - `/create compile-task <source_task_id>` creates a runnable compiled child task and marks the source task `compiled`
 - Recompiling the same source marks older pending or prerequisite-blocked compiled children `superseded`

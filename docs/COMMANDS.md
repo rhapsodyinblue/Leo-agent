@@ -182,6 +182,8 @@ Known command forms:
 - `/create read`
 - `/create compile-task <source_task_id>`
 - `/create reset-blocked`
+- `/create dependency-clear <task_id> <dependency_id_or_title>`
+- `/create dependency-override <task_id>`
 
 Purpose:
 
@@ -209,6 +211,7 @@ Safety notes:
 - `/create build-task` is marked as replaced by the build-queue / compile-task / task-run flow.
 - Compiled CREATE tasks are designed to become bounded one-file BUILD tasks.
 - `/create reset-blocked` only rechecks active-project tasks already in `blocked_prerequisite`; passing tasks are reset to `pending` and are not executed.
+- `/create dependency-clear` and `/create dependency-override` are active-project escape hatches for dependency repair; they do not execute tasks.
 
 ## `/review`
 

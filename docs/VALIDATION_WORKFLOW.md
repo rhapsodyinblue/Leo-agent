@@ -98,6 +98,7 @@ Likely high-level flow:
 | `CREATE_PROJECTS/<slug>/PROJECT_BUILD_DOC_INTAKE.md` | CREATE intake side effect | Appended on approved CREATE-linked operations. |
 | `CREATE_PROJECTS/<slug>/PROJECT_BUILD_STATE.md` | CREATE build-state side effect | Approved CREATE operations append implementation summaries here. |
 | task result metadata | Validation context | Observed fields include `expected_after`, baseline data, task ids/goals, source task ids, approved project metadata, and tool-limit context. |
+| `completion_verification` | Task completion evidence | Records whether a BUILD task produced a parsed, staged, or approved durable artifact, plus failures when staging is blocked. |
 
 ## Approval Gates
 
@@ -108,6 +109,7 @@ Likely high-level flow:
 - Task-produced staged operations mark the originating task as requiring a durable write receipt.
 - Approval records durable artifact receipt metadata on the originating task.
 - Dependency checks can block downstream tasks until that receipt exists.
+- BUILD tasks that report done but produce no stageable artifact are recorded as `needs_artifact`, not clean `done`.
 
 ### Review and tester recommendations
 - `/review pending` gives a safety/risk recommendation.

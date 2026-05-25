@@ -363,14 +363,157 @@ def record_task_durable_write_approval(pending, approved_at=None):
         "approved_at": approved_at
     })
 
-    return update_task(task.get("task_id"), {
+    completion_verification = task.get("completion_verification") or {}
+    if completion_verification:
+        evidence = list(completion_verification.get("evidence") or [])
+        evidence.append({
+            "type": "durable_receipt",
+            "filename": pending.get("filename"),
+            "operation": pending.get("operation"),
+            "approved_at": approved_at
+        })
+        completion_verification = {
+            **completion_verification,
+            "state": "durable_receipt",
+            "checked_at": approved_at,
+            "evidence": evidence
+        }
+
+    updates = {
         "inputs": {
             **inputs,
             "durable_write_required": True,
             "durable_write_approved_at": approved_at,
             "durable_artifacts": durable_artifacts
         }
-    })
+    }
+
+    if completion_verification:
+        updates["completion_verification"] = completion_verification
+
+    return update_task(task.get("task_id"), updates)
+
+
+def task_expects_file_artifact(task):
+    if (task.get("intent") or "").upper() != "BUILD":
+        return False
+
+    inputs = task.get("inputs") or {}
+    if inputs.get("completion_artifact_optional"):
+        return False
+
+    return True
+
+
+def file_operation_is_stageable(file_operation):
+    if not isinstance(file_operation, dict):
+        return False
+
+    if not file_operation.get("should_stage"):
+        return False
+
+    if not file_operation.get("filename"):
+        return False
+
+    return bool(file_operation.get("content"))
+
+
+def extract_model_status_from_text(text):
+    status_match = re.search(r"^\s*STATUS:\s*(\w+)", text or "", flags=re.IGNORECASE | re.MULTILINE)
+    status = (status_match.group(1) if status_match else "done").lower().strip()
+    if status not in ["done", "blocked", "needs_user", "needs_artifact"]:
+        status = "done"
+    return status
+
+
+def completion_verification(state, evidence=None, failures=None, checked_at=None):
+    return {
+        "state": state,
+        "checked_at": checked_at or datetime.now().isoformat(timespec="seconds"),
+        "evidence": evidence or [],
+        "failures": failures or []
+    }
+
+
+def build_completion_verification_for_task(task, model_status, file_operation):
+    if not task_expects_file_artifact(task):
+        return completion_verification(
+            "not_required",
+            evidence=[{"type": "task_intent", "intent": task.get("intent") or "PLAN"}],
+            failures=[]
+        )
+
+    if model_status == "done" and not file_operation_is_stageable(file_operation):
+        return completion_verification(
+            "missing_artifact",
+            evidence=[{"type": "model_status", "status": model_status}],
+            failures=[{
+                "reason": "build_task_done_without_stageable_file_operation",
+                "detail": "BUILD task reported done but no stageable file artifact was parsed."
+            }]
+        )
+
+    if file_operation_is_stageable(file_operation):
+        return completion_verification(
+            "artifact_parsed",
+            evidence=[{
+                "type": "parsed_artifact",
+                "filename": file_operation.get("filename"),
+                "operation": file_operation.get("operation") or file_operation.get("mode")
+            }],
+            failures=[]
+        )
+
+    return completion_verification(
+        "not_verified",
+        evidence=[{"type": "model_status", "status": model_status}],
+        failures=[]
+    )
+
+
+def update_task_completion_verification(task_id, state, evidence=None, failures=None, status=None, next_action=None):
+    task = get_task(task_id)
+    if not task:
+        return None
+
+    existing = task.get("completion_verification") or {}
+    merged_evidence = list(existing.get("evidence") or [])
+    merged_evidence.extend(evidence or [])
+    merged_failures = list(existing.get("failures") or [])
+    merged_failures.extend(failures or [])
+
+    updates = {
+        "completion_verification": completion_verification(
+            state,
+            evidence=merged_evidence,
+            failures=merged_failures
+        )
+    }
+
+    if status:
+        updates["status"] = status
+    if next_action is not None:
+        updates["next_action"] = next_action
+
+    return update_task(task_id, updates)
+
+
+def mark_task_artifact_staging_failed(task, reason, detail="", evidence=None):
+    if not task or not task_expects_file_artifact(task):
+        return None
+
+    model_status = task.get("model_status") or task.get("status")
+    if model_status != "done" and task.get("status") != "done":
+        return None
+
+    return update_task_completion_verification(
+        task.get("task_id"),
+        "artifact_staging_failed",
+        evidence=evidence or [],
+        failures=[{"reason": reason, "detail": detail}],
+        status="needs_artifact",
+        next_action="BUILD task reported done, but no file artifact was staged. Repair or rerun the task to produce a stageable artifact."
+    )
 
 
 def append_build_doc_intake(project_slug, original_task, filename, operation, source_task_id=None):
@@ -2136,7 +2279,7 @@ def parse_build_response(text):
         return None
 
     status = status.lower().strip()
-    if status not in ["done", "blocked", "needs_user"]:
+    if status not in ["done", "blocked", "needs_user", "needs_artifact"]:
         status = "done"
 
     implementation_analysis = extract_implementation_analysis(text)
@@ -3804,6 +3947,26 @@ Rules:
             parsed = parse_json_or_none(repair)
 
     if parsed is None:
+        if task_expects_file_artifact(task) and task_intent == "BUILD":
+            model_status = extract_model_status_from_text(raw)
+            if model_status == "done":
+                return update_task(task["task_id"], {
+                    "status": "needs_artifact",
+                    "model_status": model_status,
+                    "completion_verification": completion_verification(
+                        "missing_artifact",
+                        evidence=[{"type": "model_status", "status": model_status}],
+                        failures=[{
+                            "reason": "build_task_done_without_parseable_file_operation",
+                            "detail": "BUILD task reported done but did not produce a parseable file artifact."
+                        }]
+                    ),
+                    "result": raw,
+                    "next_action": "BUILD task reported done, but no parseable file artifact was produced.",
+                    "needs_user": False,
+                    "inputs": task.get("inputs", {})
+                })
+
         return update_task(task["task_id"], {
             "status": "blocked",
             "result": raw,
@@ -3811,18 +3974,38 @@ Rules:
             "needs_user": True
         })
 
-    final_status = parsed.get("status", "done")
-    if final_status not in ["done", "blocked", "needs_user"]:
+    model_status = parsed.get("status", "done")
+    if model_status not in ["done", "blocked", "needs_user", "needs_artifact"]:
+        model_status = "done"
+
+    file_operation = parsed.get("file_operation") or parsed.get("file_write")
+    verification = build_completion_verification_for_task(task, model_status, file_operation)
+
+    final_status = model_status
+    if final_status not in ["done", "blocked", "needs_user", "needs_artifact"]:
         final_status = "done"
+
+    if (
+        task_expects_file_artifact(task)
+        and model_status == "done"
+        and not file_operation_is_stageable(file_operation)
+    ):
+        final_status = "needs_artifact"
 
     return update_task(task["task_id"], {
         "status": final_status,
+        "model_status": model_status,
+        "completion_verification": verification,
         "result": parsed.get("result"),
-        "next_action": parsed.get("next_action"),
+        "next_action": (
+            "BUILD task reported done, but no stageable file artifact was parsed."
+            if final_status == "needs_artifact"
+            else parsed.get("next_action")
+        ),
         "needs_user": parsed.get("needs_user", False),
         "inputs": task.get("inputs", {}),
         "memory_candidate": parsed.get("memory_candidate"),
-        "file_operation": parsed.get("file_operation") or parsed.get("file_write"),
+        "file_operation": file_operation,
         "file_write": parsed.get("file_write"),
         "expected_after": task.get("inputs", {}).get("expected_after"),
         "validation_js": task.get("inputs", {}).get("last_validation_js"),
@@ -8073,6 +8256,12 @@ Next action: {updated.get('next_action')}""").send()
 
                 existing_file_path_for_edit = safe_knowledge_path(filename)
                 if not Path(existing_file_path_for_edit).exists():
+                    mark_task_artifact_staging_failed(
+                        updated,
+                        "edit_target_missing",
+                        f"EDIT requires existing file `{filename}`.",
+                        evidence=[{"type": "parsed_artifact", "filename": filename, "operation": operation}]
+                    )
                     await cl.Message(content=f"""The file operation was not staged yet.
 
 EDIT requires an existing file.
@@ -8118,6 +8307,12 @@ Target file: `{filename}`""").send()
                             if repaired_diff.get("ok"):
                                 fim_replace = repaired_replace
                             else:
+                                mark_task_artifact_staging_failed(
+                                    updated,
+                                    "slice_preservation_failed",
+                                    repaired_diff.get("report", ""),
+                                    evidence=[{"type": "parsed_artifact", "filename": filename, "operation": operation}]
+                                )
                                 await cl.Message(content=f"""The file operation was not staged yet.
 
 Slice-level JSX preservation check failed after repair attempt.
@@ -8156,6 +8351,12 @@ The replacement slice should carry forward existing visible behavior inside the 
                             edit_blocks.get("replace", "")
                         )
                 else:
+                    mark_task_artifact_staging_failed(
+                        updated,
+                        "edit_patch_missing",
+                        "EDIT operation lacked SEARCH/REPLACE or line-range patch data.",
+                        evidence=[{"type": "parsed_artifact", "filename": filename, "operation": operation}]
+                    )
                     await cl.Message(content=f"""The file operation was not staged yet.
 
 EDIT requires either SEARCH/REPLACE blocks or fallback EDIT_RANGE_START, EDIT_RANGE_END, and REPLACE.
@@ -8166,6 +8367,12 @@ The BUILD response must provide an edit patch. Full-file CONTENT is not accepted
                     return
 
                 if not patch_result.get("success"):
+                    mark_task_artifact_staging_failed(
+                        updated,
+                        "edit_patch_application_failed",
+                        patch_result.get("error", ""),
+                        evidence=[{"type": "parsed_artifact", "filename": filename, "operation": operation}]
+                    )
                     await cl.Message(content=f"""The file operation was not staged yet.
 
 Surgical edit application failed.
@@ -8223,6 +8430,12 @@ The BUILD response must provide a valid line range from the numbered target file
                 )
 
                 if not has_read_context:
+                    mark_task_artifact_staging_failed(
+                        updated,
+                        "read_before_modify_required",
+                        f"`{filename}` must be read before staging {operation}.",
+                        evidence=[{"type": "parsed_artifact", "filename": filename, "operation": operation}]
+                    )
                     await cl.Message(content=f"""I cannot safely modify `{filename}` yet.
 
 Reason: this file already exists, and Leo must inspect its current structure before staging an operation.
@@ -8238,6 +8451,12 @@ Then re-run the task. Leo will remember the read file and continue without block
 
             if maturity and maturity.get("decision") == "block":
                 reasons = "\n".join(f"- {r}" for r in maturity.get("reasons", [])[:8])
+                mark_task_artifact_staging_failed(
+                    updated,
+                    "replace_risk_blocked",
+                    maturity.get("summary", ""),
+                    evidence=[{"type": "parsed_artifact", "filename": filename, "operation": operation}]
+                )
                 await cl.Message(content=f"""The file operation was not staged yet.
 
 Replace risk is too high for this file.
@@ -8291,6 +8510,12 @@ Why:
                 repaired_static_result = validate_react_static_behavior_contract(repaired_content)
 
                 if not repaired_static_result.get("success"):
+                    mark_task_artifact_staging_failed(
+                        updated,
+                        "static_behavior_contract_failed",
+                        repaired_static_result.get("report", ""),
+                        evidence=[{"type": "parsed_artifact", "filename": filename, "operation": operation}]
+                    )
                     await cl.Message(content=f"""The file operation was not staged yet.
 
 Static behavior contract failed after repair attempt.
@@ -8328,6 +8553,12 @@ The candidate should define referenced handlers and keep mapped state values arr
                 repaired_syntax_result = validate_proposed_code_syntax(filename, repaired_content)
 
                 if not repaired_syntax_result.get("success"):
+                    mark_task_artifact_staging_failed(
+                        updated,
+                        "syntax_validation_failed",
+                        repaired_syntax_result.get("stderr") or repaired_syntax_result.get("stdout") or "",
+                        evidence=[{"type": "parsed_artifact", "filename": filename, "operation": operation}]
+                    )
                     await cl.Message(content=f"""The file operation was not staged yet.
 
 Syntax validation failed after repair attempt.
@@ -8357,6 +8588,12 @@ The candidate needs another repair pass before it can be safely staged.""").send
 
             ok, violation = validate_task_tool_limits(task, filename, content, operation)
             if not ok:
+                mark_task_artifact_staging_failed(
+                    updated,
+                    "tool_limit_violation",
+                    violation,
+                    evidence=[{"type": "parsed_artifact", "filename": filename, "operation": operation}]
+                )
                 await cl.Message(content=f"""The file operation was not staged yet.
 
 {violation}
@@ -8452,6 +8689,12 @@ This usually means the BUILD response needs to be narrowed to the requested file
                     )
 
                     if repaired_baseline_diff.get("ok") is False:
+                        mark_task_artifact_staging_failed(
+                            updated,
+                            "baseline_preservation_failed",
+                            repaired_baseline_diff.get("report", ""),
+                            evidence=[{"type": "parsed_artifact", "filename": filename, "operation": operation}]
+                        )
                         await cl.Message(content=f"""The file operation was not staged yet.
 
 Baseline preservation check failed after repair attempt.
@@ -8484,6 +8727,18 @@ The candidate should preserve baseline facts unless the task intentionally chang
             pending = enrich_pending_write_from_task(pending, task)
             if pending:
                 mark_task_durable_write_staged(pending)
+                update_task_completion_verification(
+                    updated.get("task_id"),
+                    "staged_artifact",
+                    evidence=[{
+                        "type": "staged_artifact",
+                        "write_id": pending.get("write_id"),
+                        "filename": filename,
+                        "operation": operation,
+                        "staged_at": pending.get("staged_at")
+                    }],
+                    failures=[]
+                )
 
             await cl.Message(content=f"""Proposed file operation staged from task.
 
@@ -8835,6 +9090,12 @@ Next action: {updated.get('next_action')}""").send()
 
                 existing_file_path_for_edit = safe_knowledge_path(filename)
                 if not Path(existing_file_path_for_edit).exists():
+                    mark_task_artifact_staging_failed(
+                        updated,
+                        "edit_target_missing",
+                        f"EDIT requires existing file `{filename}`.",
+                        evidence=[{"type": "parsed_artifact", "filename": filename, "operation": operation}]
+                    )
                     await cl.Message(content=f"""The file operation was not staged yet.
 
 EDIT requires an existing file.
@@ -8880,6 +9141,12 @@ Target file: `{filename}`""").send()
                             if repaired_diff.get("ok"):
                                 fim_replace = repaired_replace
                             else:
+                                mark_task_artifact_staging_failed(
+                                    updated,
+                                    "slice_preservation_failed",
+                                    repaired_diff.get("report", ""),
+                                    evidence=[{"type": "parsed_artifact", "filename": filename, "operation": operation}]
+                                )
                                 await cl.Message(content=f"""The file operation was not staged yet.
 
 Slice-level JSX preservation check failed after repair attempt.
@@ -8918,6 +9185,12 @@ The replacement slice should carry forward existing visible behavior inside the 
                             edit_blocks.get("replace", "")
                         )
                 else:
+                    mark_task_artifact_staging_failed(
+                        updated,
+                        "edit_patch_missing",
+                        "EDIT operation lacked SEARCH/REPLACE or line-range patch data.",
+                        evidence=[{"type": "parsed_artifact", "filename": filename, "operation": operation}]
+                    )
                     await cl.Message(content=f"""The file operation was not staged yet.
 
 EDIT requires either SEARCH/REPLACE blocks or fallback EDIT_RANGE_START, EDIT_RANGE_END, and REPLACE.
@@ -8928,6 +9201,12 @@ The BUILD response must provide an edit patch. Full-file CONTENT is not accepted
                     return
 
                 if not patch_result.get("success"):
+                    mark_task_artifact_staging_failed(
+                        updated,
+                        "edit_patch_application_failed",
+                        patch_result.get("error", ""),
+                        evidence=[{"type": "parsed_artifact", "filename": filename, "operation": operation}]
+                    )
                     await cl.Message(content=f"""The file operation was not staged yet.
 
 Surgical edit application failed.
@@ -8985,6 +9264,12 @@ The BUILD response must provide a valid line range from the numbered target file
                 )
 
                 if not has_read_context:
+                    mark_task_artifact_staging_failed(
+                        updated,
+                        "read_before_modify_required",
+                        f"`{filename}` must be read before staging {operation}.",
+                        evidence=[{"type": "parsed_artifact", "filename": filename, "operation": operation}]
+                    )
                     await cl.Message(content=f"""I cannot safely modify `{filename}` yet.
 
 Reason: this file already exists, and Leo must inspect its current structure before staging an operation.
@@ -9000,6 +9285,12 @@ Then re-run the task. Leo will remember the read file and continue without block
 
             if maturity and maturity.get("decision") == "block":
                 reasons = "\n".join(f"- {r}" for r in maturity.get("reasons", [])[:8])
+                mark_task_artifact_staging_failed(
+                    updated,
+                    "replace_risk_blocked",
+                    maturity.get("summary", ""),
+                    evidence=[{"type": "parsed_artifact", "filename": filename, "operation": operation}]
+                )
                 await cl.Message(content=f"""The file operation was not staged yet.
 
 Replace risk is too high for this file.
@@ -9053,6 +9344,12 @@ Why:
                 repaired_static_result = validate_react_static_behavior_contract(repaired_content)
 
                 if not repaired_static_result.get("success"):
+                    mark_task_artifact_staging_failed(
+                        updated,
+                        "static_behavior_contract_failed",
+                        repaired_static_result.get("report", ""),
+                        evidence=[{"type": "parsed_artifact", "filename": filename, "operation": operation}]
+                    )
                     await cl.Message(content=f"""The file operation was not staged yet.
 
 Static behavior contract failed after repair attempt.
@@ -9090,6 +9387,12 @@ The candidate should define referenced handlers and keep mapped state values arr
                 repaired_syntax_result = validate_proposed_code_syntax(filename, repaired_content)
 
                 if not repaired_syntax_result.get("success"):
+                    mark_task_artifact_staging_failed(
+                        updated,
+                        "syntax_validation_failed",
+                        repaired_syntax_result.get("stderr") or repaired_syntax_result.get("stdout") or "",
+                        evidence=[{"type": "parsed_artifact", "filename": filename, "operation": operation}]
+                    )
                     await cl.Message(content=f"""The file operation was not staged yet.
 
 Syntax validation failed after repair attempt.
@@ -9119,6 +9422,12 @@ The candidate needs another repair pass before it can be safely staged.""").send
 
             ok, violation = validate_task_tool_limits(task, filename, content, operation)
             if not ok:
+                mark_task_artifact_staging_failed(
+                    updated,
+                    "tool_limit_violation",
+                    violation,
+                    evidence=[{"type": "parsed_artifact", "filename": filename, "operation": operation}]
+                )
                 await cl.Message(content=f"""The file operation was not staged yet.
 
 {violation}
@@ -9214,6 +9523,12 @@ This usually means the BUILD response needs to be narrowed to the requested file
                     )
 
                     if repaired_baseline_diff.get("ok") is False:
+                        mark_task_artifact_staging_failed(
+                            updated,
+                            "baseline_preservation_failed",
+                            repaired_baseline_diff.get("report", ""),
+                            evidence=[{"type": "parsed_artifact", "filename": filename, "operation": operation}]
+                        )
                         await cl.Message(content=f"""The file operation was not staged yet.
 
 Baseline preservation check failed after repair attempt.
@@ -9246,6 +9561,18 @@ The candidate should preserve baseline facts unless the task intentionally chang
             pending = enrich_pending_write_from_task(pending, task)
             if pending:
                 mark_task_durable_write_staged(pending)
+                update_task_completion_verification(
+                    updated.get("task_id"),
+                    "staged_artifact",
+                    evidence=[{
+                        "type": "staged_artifact",
+                        "write_id": pending.get("write_id"),
+                        "filename": filename,
+                        "operation": operation,
+                        "staged_at": pending.get("staged_at")
+                    }],
+                    failures=[]
+                )
 
             await cl.Message(content=f"""Proposed file operation staged from task.
 

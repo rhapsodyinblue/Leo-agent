@@ -48,7 +48,8 @@ Related state:
 
 - Target files under `~/Desktop/Leo_Files`.
 - `BACKUPS/`
-- Chainlit session keys: `pending_write`, `last_read_file`.
+- `PENDING_WRITES.json`
+- Chainlit session keys: `active_pending_write_id`, `last_read_file`.
 - `OPERATION_LOG.md`
 
 Safety notes:
@@ -70,6 +71,8 @@ Known command forms:
 - `/cancel write`
 - `/rollback staged`
 - `/rollback retry surgical`
+- `/write list`
+- `/write use <write_id>`
 - `/write preview raw`
 - `/write preview full`
 
@@ -77,11 +80,13 @@ Purpose:
 
 - Reviews and controls staged file operations.
 - Promotes staged writes to actual file changes only after the matching approval command.
+- Keeps staged writes in a durable pending-write queue while one write remains active for approval/review/test commands.
 - Provides previews and rollback/retry paths for pending operations.
 
 Related state:
 
-- Chainlit session key: `pending_write`.
+- `PENDING_WRITES.json`
+- Chainlit session key: `active_pending_write_id`.
 - `BACKUPS/`
 - `OPERATION_LOG.md`
 - `REVIEW_LOG.md`
@@ -92,6 +97,7 @@ Safety notes:
 - Replace requires `/approve replace`; edit requires `/approve edit`; create/append require `/approve write`.
 - Edit and replace create backups before writing when possible.
 - Auto-approval is limited to low-risk create/append cases after an approving review.
+- `/write list` shows pending queued writes; `/write use <write_id>` selects the active write.
 - `/rollback staged` restores from the staged original-content snapshot when available.
 - `/rollback retry surgical` restores the original snapshot and creates a narrower retry task.
 
@@ -120,7 +126,7 @@ Related state:
 
 - `TASK_QUEUE.json`
 - `TASK_ARCHIVE.json`
-- Chainlit session keys: `last_created_task_id`, `last_read_file`, `pending_write`.
+- Chainlit session keys: `last_created_task_id`, `last_read_file`, `active_pending_write_id`.
 - CREATE project files when tasks are tied to an approved CREATE project.
 
 Safety notes:
@@ -225,7 +231,8 @@ Purpose:
 
 Related state:
 
-- Chainlit session key: `pending_write`.
+- Active entry in `PENDING_WRITES.json`.
+- Chainlit session key: `active_pending_write_id`.
 - `REVIEW_LOG.md`
 
 Safety notes:
@@ -247,7 +254,8 @@ Purpose:
 
 Related state:
 
-- Chainlit session key: `pending_write`.
+- Active entry in `PENDING_WRITES.json`.
+- Chainlit session key: `active_pending_write_id`.
 - Pending operation metadata such as expected-after and baseline report when available.
 
 Safety notes:

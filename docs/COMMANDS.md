@@ -216,6 +216,7 @@ Safety notes:
 - Build queue generation depends on an approved plan and current build-state freshness.
 - `/create build-task` is marked as replaced by the build-queue / compile-task / task-run flow.
 - Compiled CREATE tasks are designed to become bounded one-file BUILD tasks.
+- BUILD task completion is verified by parsed/staged/durable artifact evidence; missing artifacts are recorded as `needs_artifact`.
 - `/create reset-blocked` only rechecks active-project tasks already in `blocked_prerequisite`; passing tasks are reset to `pending` and are not executed.
 - `/create dependency-clear` and `/create dependency-override` are active-project escape hatches for dependency repair; they do not execute tasks.
 

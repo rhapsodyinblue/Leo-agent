@@ -22,7 +22,7 @@ Likely high-level flow:
 -> prerequisite check
 -> model execution via `run_task(...)`
 -> task result parsed into status, result, next action, optional staged file operation, optional memory candidate
--> if file output exists, operation is staged in `pending_write`
+-> if file output exists, operation is staged in `PENDING_WRITES.json`
 -> `/review pending` and/or `/test pending`
 -> approval, cancel, rollback, or retry
 -> task remains documented in queue with updated status
@@ -91,7 +91,8 @@ Likely high-level flow:
 |---|---|---|
 | `TASK_QUEUE.json` | Active task store | Tasks include `task_id`, timestamps, `status`, `assigned_role`, `intent`, `goal`, `inputs`, `next_action`, `result`, `needs_user`, and `memory_candidate`. |
 | `TASK_ARCHIVE.json` | Archive for completed tasks | Populated by `/task archive done`. |
-| `pending_write` | Session-staged file operation from a task result | Holds operation, file, content, reason, review/test metadata, snapshots, and CREATE-related metadata when present. |
+| `PENDING_WRITES.json` | Durable staged file-operation queue | Holds operation, file, content, reason, review/test metadata, snapshots, CREATE/task metadata, and pending/approved/canceled status. |
+| `active_pending_write_id` | Active staged file-operation selector | Points approval/review/test commands at one pending queue entry while other pending writes remain queued. |
 | `pending_memory` | Session-staged memory proposal | Can be auto-generated after task execution. |
 | `REVIEW_LOG.md` | Review audit trail | Updated by `/review pending`. |
 | `OPERATION_LOG.md` | File-operation log | Updated when approved operations are actually written. |
@@ -135,10 +136,10 @@ Likely high-level flow:
   - syntax/static checks
   - baseline preservation checks
   - tool-limit enforcement
-- Successful candidates become `pending_write`, not immediate disk writes.
+- Successful candidates become pending entries in `PENDING_WRITES.json`, not immediate disk writes.
 
 ### Approval effect on task flow
-- Approval commands operate on the staged file result, not on the queue entry itself.
+- Approval commands operate on the active staged file result, not directly on the task queue entry.
 - A task-produced staged file operation records `durable_write_required` and pending artifact metadata on the originating task.
 - Approval records `durable_artifacts` and `durable_write_approved_at` on the originating task.
 - Dependency checks do not treat a completed file-writing task as satisfied until its durable write receipt exists.
@@ -177,7 +178,7 @@ Likely high-level flow:
 ## Safety And Validation Flow
 
 ### Staged operations
-- Task-produced file changes go into `pending_write`.
+- Task-produced file changes go into `PENDING_WRITES.json`.
 - Approval commands are separate from task execution.
 
 ### Reviewer / tester interaction

@@ -4,7 +4,7 @@
 
 Leo's validation/review layer appears to exist to keep model-generated file changes from going straight to disk without checks. It does three main things:
 
-- stages proposed writes in session state
+- stages proposed writes in a durable pending-write queue
 - validates and reviews candidates before approval
 - preserves rollback/retry paths and logs approved operations
 
@@ -16,7 +16,7 @@ Likely high-level flow:
 
 `task/model proposes file operation`
 -> validation/repair checks run before staging when the operation comes from task execution
--> staged as `pending_write`
+-> staged in `PENDING_WRITES.json` and selected as the active pending write
 -> preview via `/write preview ...`
 -> optional `/review pending`
 -> optional `/test pending`
@@ -29,13 +29,13 @@ Likely high-level flow:
 
 ### `/review pending`
 - Runs a model-based safety review against the staged operation
-- Stores review metadata on `pending_write`
+- Stores review metadata on the active pending-write queue entry
 - Logs the review to `REVIEW_LOG.md`
 - Can trigger auto-execution when the operation qualifies for auto-approval
 
 ### `/test pending`
 - Runs a stricter model-based tester/adjudicator pass
-- Stores tester verdict metadata on `pending_write`
+- Stores tester verdict metadata on the active pending-write queue entry
 - Produces judgments such as `APPROVE`, `FIX_FORWARD`, `ROLLBACK_RETRY`, `SPLIT_TASKS`, or `BLOCKED`
 
 ### `/approve write`
@@ -63,12 +63,13 @@ Likely high-level flow:
 - Requires a reviewer `APPROVE` plus `LOW` risk signal
 
 ### `/cancel write`
-- Clears `pending_write`
+- Marks the active pending-write queue entry canceled
+- Clears the active pending-write pointer
 - Cancels the staged operation without writing
 
 ### `/rollback staged`
 - Restores the original content snapshot from the currently staged operation
-- Clears `pending_write`
+- Marks the active queue entry canceled and clears the active pointer
 
 ### `/rollback retry surgical`
 - Restores the original file snapshot
@@ -89,7 +90,8 @@ Likely high-level flow:
 
 | State | Role | Notes |
 |---|---|---|
-| `pending_write` | Session-staged operation | Holds filename, content, operation, reason, original snapshot, staged snapshot, review/test metadata, rollback availability, and task/CREATE metadata when present. |
+| `PENDING_WRITES.json` | Durable staged-operation queue | Holds filename, content, operation, reason, original snapshot, staged snapshot, review/test metadata, rollback availability, task/CREATE metadata, and pending/approved/canceled status. |
+| `active_pending_write_id` | Session selector for active queue entry | Keeps existing active-write UX for `/approve`, `/cancel`, `/rollback`, `/write preview`, `/review pending`, and `/test pending`. |
 | `REVIEW_LOG.md` | Review audit log | Receives `/review pending` outputs. |
 | `OPERATION_LOG.md` | Approved-operation log | Receives writes after approval or eligible auto-approval. |
 | `BACKUPS/` | Durable restore source | Used for replace/edit backups and manual file rollback staging. |
@@ -100,7 +102,7 @@ Likely high-level flow:
 ## Approval Gates
 
 ### Staged operation vs. actual disk write
-- `pending_write` is the holding area.
+- `PENDING_WRITES.json` is the holding area.
 - A staged operation is not yet durable file state.
 - Approval commands are what actually write to disk.
 - Task-produced staged operations mark the originating task as requiring a durable write receipt.
@@ -183,7 +185,7 @@ Observed helper categories:
 - The retry prompt emphasizes preservation and minimal change
 
 ### Stale session-state risk
-- `pending_write` is session-scoped
+- `active_pending_write_id` is session-scoped
 - A stale or missing session could separate:
   - the current file on disk
   - the staged candidate
@@ -202,7 +204,7 @@ Observed helper categories:
 ## Verified vs. Inferred vs. Runtime-Only
 
 ### Verified from static inspection
-- Task-produced file operations are staged in `pending_write`
+- Task-produced file operations are staged in `PENDING_WRITES.json`
 - Review and tester passes store metadata on the staged operation
 - Manual approval commands are operation-specific
 - Auto-approval exists with explicit eligibility checks

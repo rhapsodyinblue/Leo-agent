@@ -33,6 +33,7 @@ LEO_FILES_PATH = os.path.expanduser("~/Desktop/Leo_Files")
 TASK_QUEUE_PATH = os.path.join(LEO_FILES_PATH, "TASK_QUEUE.json")
 TASK_ARCHIVE_PATH = os.path.join(LEO_FILES_PATH, "TASK_ARCHIVE.json")
 MEMORY_INDEX_PATH = os.path.join(LEO_FILES_PATH, "MEMORY_INDEX.json")
+PENDING_WRITES_PATH = os.path.join(LEO_FILES_PATH, "PENDING_WRITES.json")
 EMBED_MODEL = "mxbai-embed-large"
 
 MAX_HISTORY_MESSAGES = 6
@@ -75,6 +76,125 @@ def safe_knowledge_path(filename):
 
     return path
 
+
+def load_pending_writes():
+    if not os.path.exists(PENDING_WRITES_PATH):
+        return {"writes": []}
+
+    try:
+        with open(PENDING_WRITES_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return {"writes": []}
+
+    if isinstance(data, dict) and isinstance(data.get("writes"), list):
+        return data
+
+    return {"writes": []}
+
+
+def save_pending_writes(data):
+    os.makedirs(os.path.dirname(PENDING_WRITES_PATH), exist_ok=True)
+    if not isinstance(data, dict):
+        data = {"writes": []}
+    if not isinstance(data.get("writes"), list):
+        data["writes"] = []
+
+    with open(PENDING_WRITES_PATH, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+
+    return data
+
+
+def create_pending_write(filename, content, operation="replace", reason="", **metadata):
+    now = datetime.now().isoformat(timespec="seconds")
+    pending = {
+        "write_id": uuid.uuid4().hex[:12],
+        "status": "pending",
+        "filename": filename,
+        "content": content,
+        "operation": operation,
+        "reason": reason,
+        "staged_at": metadata.pop("staged_at", now),
+        "updated_at": now,
+        **metadata
+    }
+
+    data = load_pending_writes()
+    data["writes"].append(pending)
+    save_pending_writes(data)
+    return pending
+
+
+def update_pending_write(write_id, updates):
+    if not write_id:
+        return None
+
+    data = load_pending_writes()
+    updated = None
+    now = datetime.now().isoformat(timespec="seconds")
+
+    for index, pending in enumerate(data.get("writes", [])):
+        if pending.get("write_id") == write_id:
+            merged = {**pending, **(updates or {}), "write_id": write_id, "updated_at": now}
+            data["writes"][index] = merged
+            updated = merged
+            break
+
+    if updated:
+        save_pending_writes(data)
+        if cl.user_session.get("active_pending_write_id") == write_id:
+            cl.user_session.set("pending_write", updated)
+
+    return updated
+
+
+def get_active_pending_write():
+    active_write_id = cl.user_session.get("active_pending_write_id")
+    if not active_write_id:
+        return None
+
+    for pending in load_pending_writes().get("writes", []):
+        if pending.get("write_id") == active_write_id:
+            if pending.get("status") != "pending":
+                clear_pending_write()
+                return None
+            cl.user_session.set("pending_write", pending)
+            return pending
+
+    clear_pending_write()
+    return None
+
+
+def mark_pending_write_approved(write_id, approved_at=None, updates=None):
+    approved_at = approved_at or datetime.now().isoformat(timespec="seconds")
+    return update_pending_write(write_id, {
+        **(updates or {}),
+        "status": "approved",
+        "approved_at": approved_at
+    })
+
+
+def mark_pending_write_canceled(write_id, canceled_at=None, updates=None):
+    canceled_at = canceled_at or datetime.now().isoformat(timespec="seconds")
+    return update_pending_write(write_id, {
+        **(updates or {}),
+        "status": "canceled",
+        "canceled_at": canceled_at
+    })
+
+
+def persist_pending_write(pending):
+    if not pending:
+        return None
+
+    write_id = pending.get("write_id")
+    if not write_id:
+        return pending
+
+    return update_pending_write(write_id, pending) or pending
+
+
 def stage_file_operation(filename, content, operation="replace", reason=""):
     operation = (operation or "replace").lower().strip()
 
@@ -92,16 +212,18 @@ def stage_file_operation(filename, content, operation="replace", reason=""):
     except Exception:
         original_content = ""
 
-    cl.user_session.set("pending_write", {
-        "filename": filename,
-        "content": content,
-        "operation": operation,
-        "reason": reason,
-        "rollback_available": operation in ["edit", "replace"] and original_exists,
-        "original_content_snapshot": original_content,
-        "candidate_content_snapshot": content,
-        "staged_at": datetime.now().isoformat(timespec="seconds")
-    })
+    pending = create_pending_write(
+        filename,
+        content,
+        operation=operation,
+        reason=reason,
+        rollback_available=operation in ["edit", "replace"] and original_exists,
+        original_content_snapshot=original_content,
+        candidate_content_snapshot=content
+    )
+    cl.user_session.set("active_pending_write_id", pending.get("write_id"))
+    cl.user_session.set("pending_write", pending)
+    return pending
 
 def stage_file_write(filename, content):
     operation = "append" if str(content).startswith("__APPEND__") else "replace"
@@ -150,9 +272,10 @@ def extract_pending_build_doc_intake_entries(build_doc_intake):
 
 
 def get_pending_write():
-    return cl.user_session.get("pending_write")
+    return get_active_pending_write()
 
 def clear_pending_write():
+    cl.user_session.set("active_pending_write_id", None)
     cl.user_session.set("pending_write", None)
 
 
@@ -168,7 +291,7 @@ def enrich_pending_write_from_task(pending, task):
     pending["approved_create_project"] = task_inputs.get("approved_create_project")
     pending["approved_plan_file"] = task_inputs.get("approved_plan_file")
     pending["task_inputs"] = task_inputs
-    return pending
+    return persist_pending_write(pending)
 
 
 def task_file_write_operation(task):
@@ -3712,6 +3835,7 @@ Rules:
 @cl.on_chat_start
 async def start():
     cl.user_session.set("history", [])
+    cl.user_session.set("active_pending_write_id", None)
     cl.user_session.set("pending_write", None)
     await cl.Message(content=f"🚀 Leo ({MODEL}) + Task Runner online.").send()
 
@@ -4031,6 +4155,7 @@ Rules:
                 inputs=retry_inputs
             )
 
+            mark_pending_write_canceled(pending.get("write_id"), updates={"cancel_reason": "rollback retry surgical"})
             clear_pending_write()
 
             await cl.Message(content=f"""Rollback completed and surgical retry task created.
@@ -4068,6 +4193,7 @@ Next:
             with open(file_path, "w", encoding="utf-8") as f:
                 f.write(original_content)
 
+            mark_pending_write_canceled(pending.get("write_id"), updates={"cancel_reason": "rollback staged"})
             clear_pending_write()
 
             await cl.Message(content=f"""Rollback completed.
@@ -4083,7 +4209,7 @@ The staged operation was cancelled and the file was restored from the pre-stage 
 
 
     if user_text == "/write preview raw":
-        pending = cl.user_session.get("pending_write")
+        pending = get_pending_write()
         if not pending:
             await cl.Message(content="No pending write operation.").send()
             return
@@ -4102,6 +4228,53 @@ The staged operation was cancelled and the file was restored from the pre-stage 
         )
 
         await cl.Message(content=message).send()
+        return
+
+    if user_text == "/write list":
+        data = load_pending_writes()
+        pending_writes = [item for item in data.get("writes", []) if item.get("status") == "pending"]
+
+        if not pending_writes:
+            await cl.Message(content="No pending writes found.").send()
+            return
+
+        active_write_id = cl.user_session.get("active_pending_write_id")
+        rows = []
+        for item in pending_writes[-20:]:
+            active_marker = "active" if item.get("write_id") == active_write_id else "pending"
+            task_note = f" task={item.get('task_id')}" if item.get("task_id") else ""
+            rows.append(
+                f"- `{item.get('write_id')}` [{active_marker}] {str(item.get('operation', '')).upper()} `{item.get('filename')}`{task_note} staged={item.get('staged_at')}"
+            )
+
+        await cl.Message(content="Pending writes:\n\n" + "\n".join(rows) + "\n\nUse `/write use <write_id>` to select one.").send()
+        return
+
+
+    if user_text.startswith("/write use "):
+        write_id = user_text.replace("/write use ", "", 1).strip()
+
+        if not write_id:
+            await cl.Message(content="Use this format:\n\n/write use <write_id>").send()
+            return
+
+        for pending in load_pending_writes().get("writes", []):
+            if pending.get("write_id") == write_id:
+                if pending.get("status") != "pending":
+                    await cl.Message(content=f"Write `{write_id}` is `{pending.get('status')}` and cannot be selected.").send()
+                    return
+
+                cl.user_session.set("active_pending_write_id", write_id)
+                cl.user_session.set("pending_write", pending)
+
+                await cl.Message(content=f"""Active pending write selected.
+
+Write ID: `{write_id}`
+Operation: `{str(pending.get('operation', '')).upper()}`
+File: `{pending.get('filename')}`""").send()
+                return
+
+        await cl.Message(content=f"Pending write not found: `{write_id}`").send()
         return
 
 
@@ -4275,7 +4448,7 @@ Return STRICT JSON ONLY:
                 "parsed": parsed
             }
 
-            cl.user_session.set("pending_write", pending)
+            persist_pending_write(pending)
 
             await cl.Message(content=f"""Tester verdict completed.
 
@@ -4358,7 +4531,7 @@ Suggested Fix:
                 "reviewed_at": datetime.now().isoformat(timespec="seconds"),
                 "response": review_response
             }
-            cl.user_session.set("pending_write", pending)
+            persist_pending_write(pending)
 
             log_review(filename, operation, review_response)
 
@@ -4368,7 +4541,7 @@ Suggested Fix:
             if ok:
                 pending["auto_approved"] = True
                 pending["auto_approved_at"] = datetime.now().isoformat(timespec="seconds")
-                cl.user_session.set("pending_write", pending)
+                persist_pending_write(pending)
 
                 op = pending.get("operation", "append")
                 filename = pending.get("filename")
@@ -4401,6 +4574,9 @@ Auto-approval not allowed for operation: {op}""").send()
                             f.write("\n\n" + content + "\n")
 
                     log_file_operation(filename, op, reason=reason, backup_path=None)
+                    approved_at = datetime.now().isoformat(timespec="seconds")
+                    record_task_durable_write_approval(pending, approved_at=approved_at)
+                    mark_pending_write_approved(pending.get("write_id"), approved_at=approved_at)
                     clear_pending_write()
 
                     await cl.Message(content=f"""🧠 Review (qwen2.5-coder:14b)
@@ -4589,14 +4765,10 @@ replacement text""").send()
 Use `/file read full {filename}` to inspect the current file, then try again.""").send()
                 return
 
-            cl.user_session.set("pending_write", {
-                "filename": filename,
-                "operation": "edit",
-                "old_text": old_text,
-                "new_text": new_text,
-                "content": new_text,
-                "reason": "manual /file edit command"
-            })
+            pending = stage_file_operation(filename, new_text, operation="edit", reason="manual /file edit command")
+            pending["old_text"] = old_text
+            pending["new_text"] = new_text
+            persist_pending_write(pending)
 
             await cl.Message(content=f"""Proposed file EDIT staged.
 
@@ -4679,7 +4851,7 @@ To cancel, run:
 
         pending["auto_approved"] = True
         pending["auto_approved_at"] = datetime.now().isoformat(timespec="seconds")
-        cl.user_session.set("pending_write", pending)
+        persist_pending_write(pending)
 
         operation = pending.get("operation", "append")
 
@@ -4777,6 +4949,7 @@ To cancel, run:
                 log_file_operation(filename, operation, reason=reason, backup_path=backup_path)
                 approved_at = datetime.now().isoformat(timespec="seconds")
                 record_task_durable_write_approval(pending, approved_at=approved_at)
+                mark_pending_write_approved(pending.get("write_id"), approved_at=approved_at, updates={"backup_path": backup_path})
 
                 active_project = cl.user_session.get("active_create_project")
                 if active_project:
@@ -4850,6 +5023,7 @@ Approved staged edit from CREATE workflow.
             log_file_operation(filename, operation, reason=reason, backup_path=backup_path)
             approved_at = datetime.now().isoformat(timespec="seconds")
             record_task_durable_write_approval(pending, approved_at=approved_at)
+            mark_pending_write_approved(pending.get("write_id"), approved_at=approved_at, updates={"backup_path": backup_path})
 
             active_project = cl.user_session.get("active_create_project")
             if active_project:
@@ -4882,6 +5056,9 @@ Approved staged file operation from CREATE workflow.
             return
 
     if user_text == "/cancel write":
+        pending = get_pending_write()
+        if pending:
+            mark_pending_write_canceled(pending.get("write_id"), updates={"cancel_reason": "cancel write command"})
         clear_pending_write()
         await cl.Message(content="Cancelled pending file write.").send()
         return
@@ -8306,7 +8483,6 @@ The candidate should preserve baseline facts unless the task intentionally chang
             pending = get_pending_write()
             pending = enrich_pending_write_from_task(pending, task)
             if pending:
-                cl.user_session.set("pending_write", pending)
                 mark_task_durable_write_staged(pending)
 
             await cl.Message(content=f"""Proposed file operation staged from task.
@@ -9069,7 +9245,6 @@ The candidate should preserve baseline facts unless the task intentionally chang
             pending = get_pending_write()
             pending = enrich_pending_write_from_task(pending, task)
             if pending:
-                cl.user_session.set("pending_write", pending)
                 mark_task_durable_write_staged(pending)
 
             await cl.Message(content=f"""Proposed file operation staged from task.

@@ -19,6 +19,7 @@ Primary Chainlit app state root:
 | `~/Desktop/Leo_Files/` | Root for Leo local state, project files, logs, backups, and generated project artifacts. | Most file, task, memory, CREATE, approval, and rollback helpers. | Local-first runtime state. Do not treat repo files as the source of truth for this data. |
 | `TASK_QUEUE.json` | Active task queue. Stores task id, status, role, intent, goal, inputs, result, next action, memory candidate, and related metadata. | `/task add`, `/task continue`, `/task list`, `/task run next`, `/task run <id>`, CREATE build queue/compile flows, rollback retry task creation. | High-impact. Changes can alter task execution, queued work, and continuation behavior. |
 | `TASK_ARCHIVE.json` | Archive for completed tasks moved out of the active queue. | `/task archive done`. | Archive command removes done tasks from `TASK_QUEUE.json` and appends them here. |
+| `PENDING_WRITES.json` | Durable queue of staged file operations. Stores write id, status, file operation data, snapshots, task metadata, review/test metadata, and approval/cancel receipts. | `stage_file_operation`, `/write list`, `/write use`, `/approve ...`, `/cancel write`, `/review pending`, `/test pending`, rollback commands. | Approval commands operate on the active queued write selected by `active_pending_write_id`; approved/canceled entries remain as durable history. |
 | `MEMORY.md` | Long-term memory text used for retrieval and duplicate checks. | `load_file("MEMORY.md")`, `/memory approve`, memory duplicate checks, automatic memory proposal checks after task runs. | High-impact. `/memory approve` appends only after review approval. Do not replace casually. |
 | `MEMORY_INDEX.json` | Embedding index for memory entries. Stores created timestamp, embedding model, and indexed entries. | `/memory rebuild-index`, semantic memory retrieval helpers. | Rebuildable from `MEMORY.md`; depends on `mxbai-embed-large`. |
 | `PROJECT_STATUS.md` | Current project/system state context loaded into prompts. | General agent/task prompt construction via `load_file("PROJECT_STATUS.md")`. | Prompt-context state. Edits can change Leo planning behavior. |
@@ -42,7 +43,7 @@ These are important but are stored in Chainlit session state rather than obvious
 
 | Session key | Purpose | Notes |
 | --- | --- | --- |
-| `pending_write` | Staged file operation with filename, content, operation, reason, snapshots, rollback availability, review/test metadata. | Drives `/approve`, `/cancel`, `/rollback`, `/write preview`, `/review pending`, and `/test pending`. |
+| `active_pending_write_id` | Selects the active entry in `PENDING_WRITES.json`. | Drives `/approve`, `/cancel`, `/rollback`, `/write preview`, `/review pending`, and `/test pending`. |
 | `pending_memory` | Staged memory proposal plus review metadata. | Drives `/memory review`, `/memory approve`, and `/memory cancel`. |
 | `last_read_file` | Tracks the last file read in the session. | Used as read-before-modify evidence for later task/file operations. |
 | `active_create_project` | Current CREATE project slug. | Used by CREATE commands and approval side effects. |
@@ -51,7 +52,7 @@ These are important but are stored in Chainlit session state rather than obvious
 ## Safety Notes
 
 - Task queue, CREATE project, memory, approval, and rollback state should be treated as workflow-critical.
-- `pending_write` is not durable file state, but it controls whether approvals write to disk.
+- `PENDING_WRITES.json` is durable queue state; a pending write still does not become durable project/file state until approval writes it to disk.
 - `BACKUPS/` and pre-stage snapshots are the main rollback mechanisms found in the inspected code.
 - CREATE build-state freshness matters: `/create build-queue` checks whether `PROJECT_BUILD_DOC_INTAKE.md` is newer than `PROJECT_BUILD_STATE.md`.
 - `PROJECT_BUILD_DOC_INTAKE.md` is described in prompts as workflow truth for document-state classification.

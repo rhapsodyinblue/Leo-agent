@@ -103,6 +103,9 @@ Likely high-level flow:
 - `pending_write` is the holding area.
 - A staged operation is not yet durable file state.
 - Approval commands are what actually write to disk.
+- Task-produced staged operations mark the originating task as requiring a durable write receipt.
+- Approval records durable artifact receipt metadata on the originating task.
+- Dependency checks can block downstream tasks until that receipt exists.
 
 ### Review and tester recommendations
 - `/review pending` gives a safety/risk recommendation.

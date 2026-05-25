@@ -131,6 +131,7 @@ Likely high-level flow:
 ### Staged operations and implementation evidence
 - Approved file operations during CREATE work append summaries into `PROJECT_BUILD_STATE.md`.
 - Those same approvals also append intake entries into `PROJECT_BUILD_DOC_INTAKE.md`.
+- Task-produced file operations also record durable write receipt metadata on the originating task when approved.
 - This means CREATE’s implementation history is not only code-based; it also depends on approval-time workflow logging.
 
 ### Rollback relationship

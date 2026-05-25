@@ -171,6 +171,85 @@ def enrich_pending_write_from_task(pending, task):
     return pending
 
 
+def task_file_write_operation(task):
+    file_operation = task.get("file_operation") or task.get("file_write") or {}
+    if isinstance(file_operation, dict) and file_operation.get("filename"):
+        return file_operation
+    return {}
+
+
+def task_requires_durable_write(task):
+    inputs = task.get("inputs") or {}
+    if inputs.get("durable_write_required"):
+        return True
+    if inputs.get("durable_write_pending_artifact"):
+        return True
+    return bool(task_file_write_operation(task))
+
+
+def task_has_durable_write_receipt(task):
+    inputs = task.get("inputs") or {}
+    if inputs.get("durable_write_approved_at"):
+        return True
+    durable_artifacts = inputs.get("durable_artifacts") or []
+    return bool(durable_artifacts)
+
+
+def task_has_unapproved_durable_write(task):
+    return task_requires_durable_write(task) and not task_has_durable_write_receipt(task)
+
+
+def mark_task_durable_write_staged(pending):
+    if not pending or not pending.get("task_id"):
+        return None
+
+    task = get_task(pending.get("task_id"))
+    if not task:
+        return None
+
+    inputs = task.get("inputs") or {}
+    staged_at = pending.get("staged_at") or datetime.now().isoformat(timespec="seconds")
+    return update_task(task.get("task_id"), {
+        "inputs": {
+            **inputs,
+            "durable_write_required": True,
+            "durable_write_staged_at": staged_at,
+            "durable_write_pending_artifact": {
+                "filename": pending.get("filename"),
+                "operation": pending.get("operation"),
+                "staged_at": staged_at
+            }
+        }
+    })
+
+
+def record_task_durable_write_approval(pending, approved_at=None):
+    if not pending or not pending.get("task_id"):
+        return None
+
+    task = get_task(pending.get("task_id"))
+    if not task:
+        return None
+
+    approved_at = approved_at or datetime.now().isoformat(timespec="seconds")
+    inputs = task.get("inputs") or {}
+    durable_artifacts = list(inputs.get("durable_artifacts") or [])
+    durable_artifacts.append({
+        "filename": pending.get("filename"),
+        "operation": pending.get("operation"),
+        "approved_at": approved_at
+    })
+
+    return update_task(task.get("task_id"), {
+        "inputs": {
+            **inputs,
+            "durable_write_required": True,
+            "durable_write_approved_at": approved_at,
+            "durable_artifacts": durable_artifacts
+        }
+    })
+
+
 def append_build_doc_intake(project_slug, original_task, filename, operation, source_task_id=None):
     if not project_slug:
         return
@@ -648,11 +727,11 @@ def latest_runnable_compiled_descendant(source_task, task_by_id):
 
 def dependency_task_is_satisfied(dependency_task, task_by_id):
     if dependency_task.get("status") == "done":
-        return True, None
+        return not task_has_unapproved_durable_write(dependency_task), None
 
     if dependency_task.get("status") == "compiled":
         latest_compiled = latest_non_superseded_compiled_descendant(dependency_task, task_by_id)
-        if latest_compiled and latest_compiled.get("status") == "done":
+        if latest_compiled and latest_compiled.get("status") == "done" and not task_has_unapproved_durable_write(latest_compiled):
             return True, latest_compiled
         return False, latest_compiled
 
@@ -834,8 +913,12 @@ def check_task_dependencies(task, task_by_id):
         if not satisfied:
             latest_status = latest_compiled.get("status") if latest_compiled else None
             reason = f"dependency_not_done:{dependency_task.get('status')}"
+            if dependency_task.get("status") == "done" and task_has_unapproved_durable_write(dependency_task):
+                reason = "dependency_write_not_approved"
             if dependency_task.get("status") == "compiled":
                 reason = f"compiled_dependency_not_done:{latest_status or 'no_active_compiled_task'}"
+                if latest_compiled and latest_compiled.get("status") == "done" and task_has_unapproved_durable_write(latest_compiled):
+                    reason = "dependency_write_not_approved"
             failures.append({
                 "task_id": dep_id,
                 "reason": reason
@@ -4692,11 +4775,13 @@ To cancel, run:
                     f.write(final_content)
 
                 log_file_operation(filename, operation, reason=reason, backup_path=backup_path)
+                approved_at = datetime.now().isoformat(timespec="seconds")
+                record_task_durable_write_approval(pending, approved_at=approved_at)
 
                 active_project = cl.user_session.get("active_create_project")
                 if active_project:
                     append_create_build_state(active_project, f"""
-## Approved File Operation — {datetime.now().isoformat(timespec='seconds')}
+## Approved File Operation — {approved_at}
 
 File: `{filename}`
 Operation: `edit`
@@ -4763,11 +4848,13 @@ Approved staged edit from CREATE workflow.
                 f.write(final_content)
 
             log_file_operation(filename, operation, reason=reason, backup_path=backup_path)
+            approved_at = datetime.now().isoformat(timespec="seconds")
+            record_task_durable_write_approval(pending, approved_at=approved_at)
 
             active_project = cl.user_session.get("active_create_project")
             if active_project:
                 append_create_build_state(active_project, f"""
-## Approved File Operation — {datetime.now().isoformat(timespec='seconds')}
+## Approved File Operation — {approved_at}
 
 File: `{filename}`
 Operation: `{operation}`
@@ -8220,6 +8307,7 @@ The candidate should preserve baseline facts unless the task intentionally chang
             pending = enrich_pending_write_from_task(pending, task)
             if pending:
                 cl.user_session.set("pending_write", pending)
+                mark_task_durable_write_staged(pending)
 
             await cl.Message(content=f"""Proposed file operation staged from task.
 
@@ -8982,6 +9070,7 @@ The candidate should preserve baseline facts unless the task intentionally chang
             pending = enrich_pending_write_from_task(pending, task)
             if pending:
                 cl.user_session.set("pending_write", pending)
+                mark_task_durable_write_staged(pending)
 
             await cl.Message(content=f"""Proposed file operation staged from task.
 

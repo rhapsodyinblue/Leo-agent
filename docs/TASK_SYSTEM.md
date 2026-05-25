@@ -96,6 +96,8 @@ Likely high-level flow:
 | `pending_memory` | Session-staged memory proposal | Can be auto-generated after task execution. |
 | `REVIEW_LOG.md` | Review audit trail | Updated by `/review pending`. |
 | `OPERATION_LOG.md` | File-operation log | Updated when approved operations are actually written. |
+| `model_status` | Model-reported task status | Preserves what the model reported even when Leo records a safer operational status. |
+| `completion_verification` | External completion evidence | Records verification state, checked time, staged/durable artifact evidence, and failures. |
 | CREATE task metadata in task `inputs` | CREATE continuity context | Observed keys include `approved_create_project`, `approved_plan_file`, `original_queue_task`, `source_task_id`, `target_file`, prerequisites, durable write receipts, and tool limits. |
 
 ## Execution Flow
@@ -107,6 +109,7 @@ Likely high-level flow:
 - `/create reset-blocked` can move active-project tasks from `blocked_prerequisite` back to `pending` after prerequisites pass; it does not run or compile the task.
 - CREATE source tasks move to `compiled` after `/create compile-task`; the compiled child remains the runnable `pending` task.
 - Recompiled pending or prerequisite-blocked children move to `superseded` so duplicate compiled descendants do not remain runnable.
+- BUILD tasks that report done without a stageable file artifact move to `needs_artifact` instead of remaining cleanly done.
 
 ### Model execution
 - `run_task(...)` builds task-specific prompt context from:
@@ -117,6 +120,7 @@ Likely high-level flow:
   - optional memory retrieval for non-BUILD work
   - optional auto-read target-file context
 - The model response is parsed into a structured task result.
+- Leo records `model_status` separately from operational `status` when completion verification changes the stored status.
 
 ### Result shape
 - Observed parsed outputs include:
@@ -137,11 +141,14 @@ Likely high-level flow:
   - baseline preservation checks
   - tool-limit enforcement
 - Successful candidates become pending entries in `PENDING_WRITES.json`, not immediate disk writes.
+- Successful staging records `completion_verification.state = staged_artifact`.
+- Failed staging validation for a done BUILD task records a verification failure and moves the task to `needs_artifact`.
 
 ### Approval effect on task flow
 - Approval commands operate on the active staged file result, not directly on the task queue entry.
 - A task-produced staged file operation records `durable_write_required` and pending artifact metadata on the originating task.
 - Approval records `durable_artifacts` and `durable_write_approved_at` on the originating task.
+- Approval also records durable receipt evidence in `completion_verification` when the task already has completion verification metadata.
 - Dependency checks do not treat a completed file-writing task as satisfied until its durable write receipt exists.
 - CREATE-linked approvals append project intake/build-state metadata.
 - The task result can therefore be "done" while the file operation still awaits approval/review/test follow-through.

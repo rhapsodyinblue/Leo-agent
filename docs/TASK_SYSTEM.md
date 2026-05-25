@@ -95,7 +95,7 @@ Likely high-level flow:
 | `pending_memory` | Session-staged memory proposal | Can be auto-generated after task execution. |
 | `REVIEW_LOG.md` | Review audit trail | Updated by `/review pending`. |
 | `OPERATION_LOG.md` | File-operation log | Updated when approved operations are actually written. |
-| CREATE task metadata in task `inputs` | CREATE continuity context | Observed keys include `approved_create_project`, `approved_plan_file`, `original_queue_task`, `source_task_id`, `target_file`, prerequisites, and tool limits. |
+| CREATE task metadata in task `inputs` | CREATE continuity context | Observed keys include `approved_create_project`, `approved_plan_file`, `original_queue_task`, `source_task_id`, `target_file`, prerequisites, durable write receipts, and tool limits. |
 
 ## Execution Flow
 
@@ -139,6 +139,9 @@ Likely high-level flow:
 
 ### Approval effect on task flow
 - Approval commands operate on the staged file result, not on the queue entry itself.
+- A task-produced staged file operation records `durable_write_required` and pending artifact metadata on the originating task.
+- Approval records `durable_artifacts` and `durable_write_approved_at` on the originating task.
+- Dependency checks do not treat a completed file-writing task as satisfied until its durable write receipt exists.
 - CREATE-linked approvals append project intake/build-state metadata.
 - The task result can therefore be "done" while the file operation still awaits approval/review/test follow-through.
 

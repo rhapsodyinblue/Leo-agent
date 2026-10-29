@@ -66,7 +66,7 @@ That state may include task queues, archived tasks, memory files, embedding inde
 
 Static inspection of the repository confirms code for the following areas:
 
-## Conversational routing
+### Conversational routing
 
 The Chainlit application initializes session state and routes messages through command families including:
 
@@ -82,15 +82,15 @@ The Chainlit application initializes session state and routes messages through c
 - `/review`
 - `/test`
 
-## Task queues and dependencies
+### Task queues and dependencies
 
 Leo includes code to create, list, continue, run, block, compile, supersede, and archive tasks. It also contains prerequisite and dependency checks, including special handling for CREATE-generated task children.
 
-## Staged file operations
+### Staged file operations
 
 Proposed file changes can be placed in a durable pending-write queue rather than applied immediately. The code includes previews, review metadata, tester metadata, operation-specific approval commands, backups, cancellation, rollback, and surgical retry paths.
 
-## CREATE project workflow
+### CREATE project workflow
 
 The CREATE workflow contains paths for:
 
@@ -103,7 +103,7 @@ The CREATE workflow contains paths for:
 7. running tasks through the shared task and approval system; and
 8. documenting project state.
 
-## Memory and validation
+### Memory and validation
 
 Leo includes code for reviewed memory proposals, duplicate checks, embedding-index rebuilds, relevant-memory retrieval, syntax checks, selected static-behavior checks, baseline preservation, runtime-oriented validation snippets, model-based review, tester prompts, and repair prompts.
 
@@ -113,7 +113,7 @@ These are implemented mechanisms. Their presence does not by itself prove that e
 
 The local runtime records show that Leo was used to execute a meaningful portion of a software-building workflow.
 
-## The budgeting-app experiment
+### The budgeting-app experiment
 
 I supplied a detailed plan for a local React budgeting application intended to:
 
@@ -150,21 +150,21 @@ Therefore, the budgeting experiment demonstrates incremental planning and file c
 
 Leo's status should be read using four separate categories:
 
-## Implemented code
+### Implemented code
 
 Code paths exist in the repository for routing, task management, CREATE planning, memory, staged writes, approval, rollback, and validation.
 
-## Historically demonstrated behavior
+### Historically demonstrated behavior
 
 Runtime records show successful use of project planning, task/file workflows, approved writes, backups, review records, and incremental budgeting-app source construction.
 
-## Regression-tested helpers
+### Regression-tested helpers
 
 `tests/orchestration_regression.py` passes focused checks for dependency handling, CREATE task compilation, pending-write behavior, durable write receipts, and missing-artifact detection.
 
 These tests run selected helpers in isolation. They do not launch Chainlit, call Ollama, build a React application, or exercise the budgeting app in a browser.
 
-## Unverified functionality
+### Unverified functionality
 
 The following should not be described as proven end to end:
 

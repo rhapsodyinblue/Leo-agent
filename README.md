@@ -1,8 +1,12 @@
 # Leo Agent
 
-Leo is an experimental local AI orchestration and controlled software-building system, designed with a multi-agent model in mind, built to explore whether smaller local models—supported by orchestration, planning, memory, and validation—could autonomously build general-purpose software from a detailed project plan.
+## Why Leo exists
 
-The project did not reach that goal. It produced a substantial orchestration and controlled-file-operation prototype, and it completed part of a budgeting-app experiment, but the application itself was never completed or verified running end to end.
+AI-assisted work can become unreliable when long-running tasks lose context, skip dependencies, make unreviewed file changes, or fail without a recoverable record. Leo was built to explore a controlled workflow for those problems: keep project state visible, break work into manageable tasks, stage changes for review, validate them before acceptance, and preserve backups and rollback paths when something goes wrong.
+
+Caleb built the local orchestration prototype around Chainlit, Ollama, filesystem state, task queues, memory, approval, validation, and recovery controls. It demonstrates practical workflow management and reliability thinking: a model can propose work while system rules and human review control what becomes durable. Leo also includes a real budgeting-app experiment that moved from requirements through planning, backlog generation, and incremental source construction.
+
+Leo is an experimental prototype, not a production-ready autonomous software-building platform. The budgeting application was not completed or verified end to end, and some multi-agent routing and runtime behavior remain partial or unverified. The strongest evidence is the orchestration and control layer itself: making long-running AI work more observable, reviewable, testable, and recoverable.
 
 ## Project at a glance
 
@@ -62,7 +66,7 @@ That state may include task queues, archived tasks, memory files, embedding inde
 
 Static inspection of the repository confirms code for the following areas:
 
-### Conversational routing
+## Conversational routing
 
 The Chainlit application initializes session state and routes messages through command families including:
 
@@ -78,15 +82,15 @@ The Chainlit application initializes session state and routes messages through c
 - `/review`
 - `/test`
 
-### Task queues and dependencies
+## Task queues and dependencies
 
 Leo includes code to create, list, continue, run, block, compile, supersede, and archive tasks. It also contains prerequisite and dependency checks, including special handling for CREATE-generated task children.
 
-### Staged file operations
+## Staged file operations
 
 Proposed file changes can be placed in a durable pending-write queue rather than applied immediately. The code includes previews, review metadata, tester metadata, operation-specific approval commands, backups, cancellation, rollback, and surgical retry paths.
 
-### CREATE project workflow
+## CREATE project workflow
 
 The CREATE workflow contains paths for:
 
@@ -99,7 +103,7 @@ The CREATE workflow contains paths for:
 7. running tasks through the shared task and approval system; and
 8. documenting project state.
 
-### Memory and validation
+## Memory and validation
 
 Leo includes code for reviewed memory proposals, duplicate checks, embedding-index rebuilds, relevant-memory retrieval, syntax checks, selected static-behavior checks, baseline preservation, runtime-oriented validation snippets, model-based review, tester prompts, and repair prompts.
 
@@ -109,7 +113,7 @@ These are implemented mechanisms. Their presence does not by itself prove that e
 
 The local runtime records show that Leo was used to execute a meaningful portion of a software-building workflow.
 
-### The budgeting-app experiment
+## The budgeting-app experiment
 
 I supplied a detailed plan for a local React budgeting application intended to:
 
@@ -146,21 +150,21 @@ Therefore, the budgeting experiment demonstrates incremental planning and file c
 
 Leo's status should be read using four separate categories:
 
-### Implemented code
+## Implemented code
 
 Code paths exist in the repository for routing, task management, CREATE planning, memory, staged writes, approval, rollback, and validation.
 
-### Historically demonstrated behavior
+## Historically demonstrated behavior
 
 Runtime records show successful use of project planning, task/file workflows, approved writes, backups, review records, and incremental budgeting-app source construction.
 
-### Regression-tested helpers
+## Regression-tested helpers
 
 `tests/orchestration_regression.py` passes focused checks for dependency handling, CREATE task compilation, pending-write behavior, durable write receipts, and missing-artifact detection.
 
 These tests run selected helpers in isolation. They do not launch Chainlit, call Ollama, build a React application, or exercise the budgeting app in a browser.
 
-### Unverified functionality
+## Unverified functionality
 
 The following should not be described as proven end to end:
 
